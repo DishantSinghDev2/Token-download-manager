@@ -1,5 +1,5 @@
 # Build stage
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -12,8 +12,9 @@ RUN npm ci
 # Copy source code
 COPY . .
 
+
 # Production stage
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -32,7 +33,7 @@ COPY . .
 # Create downloads directory
 RUN mkdir -p /downloads
 
-# Create worker script
+# Create worker script folder
 RUN mkdir -p /app/scripts
 
 # Start worker with ts-node

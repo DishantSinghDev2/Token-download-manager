@@ -1,5 +1,5 @@
 # Build stage
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -15,8 +15,9 @@ COPY . .
 # Build Next.js
 RUN npm run build
 
+
 # Production stage
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -32,6 +33,8 @@ RUN npm ci --production
 # Copy built application from builder
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
+
+# If you use Next.js standalone output, tell me — I can optimize even more.
 
 # Create downloads directory
 RUN mkdir -p /downloads
