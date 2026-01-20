@@ -116,13 +116,13 @@ export async function getRecentMetrics(minutes: number = 60): Promise<SystemMetr
     const cutoffTime = new Date(Date.now() - minutes * 60 * 1000);
 
     const metrics = await db
-      .collection('vm_stats')
+      .collection<SystemMetrics>('vm_stats')
       .find({ timestamp: { $gte: cutoffTime } })
       .sort({ timestamp: -1 })
       .limit(1000)
       .toArray();
 
-    return metrics as SystemMetrics[];
+    return metrics;
   } catch (error) {
     console.error('[SystemMetrics] Error getting recent metrics:', error);
     return [];

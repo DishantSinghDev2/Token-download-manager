@@ -1,43 +1,51 @@
-import { type NextAuthConfig } from 'next-auth';
-import Credentials from 'next-auth/providers/credentials';
-import { authenticateAdmin } from './auth';
+import type { NextAuthOptions } from "next-auth";
+import CredentialsProvider from "next-auth/providers/credentials";
+import { authenticateAdmin } from "./auth";
 
-export const authConfig = {
+export const authConfig: NextAuthOptions = {
   pages: {
-    signIn: '/admin/login',
+    signIn: "/admin/login",
   },
-  callbacks: {
-    authorized({ auth, request }) {
-      const isLoggedIn = !!auth?.user;
-      const isOnAdminPage = request.nextUrl.pathname.startsWith('/admin');
 
-      if (isOnAdminPage) {
-        return isLoggedIn;
-      }
+  session: { strategy: "jwt" },
 
-      return true;
-    },
-  },
   providers: [
-    Credentials({
+    CredentialsProvider({
+      name: "Credentials",
+      credentials: {
+        email: { label: "Email", type: "text" },
+        password: { label: "Password", type: "password" },
+      },
+
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) {
-          throw new Error('Invalid credentials');
-        }
+        if (!credentials?.email || !credentials?.password) return null;
 
-        const admin = await authenticateAdmin(credentials.email as string, credentials.password as string);
+        const admin = await authenticateAdmin(
+          credentials.email,
+          credentials.password
+        );
 
-        if (!admin) {
-          throw new Error('Invalid email or password');
-        }
+        if (!admin) return null;
 
         return {
           id: admin.email,
           email: admin.email,
           name: admin.email,
           role: admin.role,
-        };
+        } as any;
       },
     }),
   ],
-} satisfies NextAuthConfig;
+
+  callbacks: {
+    async jwt({ token, user }: any) {
+      if (user?.role) token.role = user.role;
+      return token;
+    },
+
+    async session({ session, token }: any) {
+      if (session?.user) (session.user as any).role = token.role;
+      return session;
+    },
+  },
+};
