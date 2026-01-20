@@ -1,4 +1,4 @@
-import { Queue, Worker, QueueScheduler } from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import { getRedisClient } from './redis';
 
 let downloadQueue: Queue | null = null;
@@ -15,12 +15,10 @@ export interface DownloadJobData {
 }
 
 export async function getDownloadQueue(): Promise<Queue> {
-  if (downloadQueue) {
-    return downloadQueue;
-  }
+  if (downloadQueue) return downloadQueue;
 
-  const redisClient = await getRedisClient();
-  
+  await getRedisClient(); // keeps your connection warm (not really needed but ok)
+
   downloadQueue = new Queue('downloads', {
     connection: {
       url: process.env.REDIS_URL || 'redis://localhost:6379',
@@ -34,30 +32,18 @@ export async function addDownloadJob(data: DownloadJobData, opts?: any) {
   const queue = await getDownloadQueue();
   return queue.add('download', data, {
     attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 2000,
-    },
-    removeOnComplete: {
-      age: 3600, // Keep completed jobs for 1 hour
-    },
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: { age: 3600 },
     removeOnFail: false,
     ...opts,
   });
 }
 
+// Removed QueueScheduler because bullmq version doesn't export it
 export async function initializeQueueScheduler() {
-  const scheduler = new QueueScheduler('downloads', {
-    connection: {
-      url: process.env.REDIS_URL || 'redis://localhost:6379',
-    },
-  });
-
-  return scheduler;
+  return null;
 }
 
-// Note: Worker should be initialized in a separate process
-// This is just for type definitions and queue management
 export function getWorkerInstance(): Worker | null {
   return downloadWorker;
 }
