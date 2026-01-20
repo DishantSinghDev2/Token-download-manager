@@ -54,17 +54,27 @@ export async function POST(request: NextRequest) {
 
     // Check quota
     let tokenUsage = await db.collection('token_usage').findOne({ tokenId: tokenDoc._id });
-    if (!tokenUsage) {
-      tokenUsage = {
-        tokenId: tokenDoc._id,
-        totalBytesDownloaded: 0,
-        downloadsCount: 0,
-        uniqueIps: new Set(),
-      };
-      await db.collection('token_usage').insertOne(tokenUsage);
-    }
 
-    const remainingQuota = tokenDoc.totalQuota - (tokenUsage.totalBytesDownloaded || 0);
+if (!tokenUsage) {
+  const tokenUsageDoc = {
+    tokenId: tokenDoc._id,
+    totalBytesDownloaded: 0,
+    downloadsCount: 0,
+    uniqueIps: [ip], // store as array (NOT Set)
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  const insertRes = await db.collection('token_usage').insertOne(tokenUsageDoc);
+
+  tokenUsage = {
+    _id: insertRes.insertedId,
+    ...tokenUsageDoc,
+  } as any;
+}
+
+
+    const remainingQuota = tokenDoc.totalQuota - (tokenUsage!.totalBytesDownloaded || 0);
     if (remainingQuota <= 0) {
       return NextResponse.json({ error: 'Download quota exceeded' }, { status: 403 });
     }
