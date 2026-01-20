@@ -1,40 +1,15 @@
-# Build stage
-FROM node:20-bookworm-slim AS builder
-
-WORKDIR /app
-
-# Copy package files
-COPY package*.json ./
-
-# Install dependencies
-RUN npm ci
-
-# Copy source code
-COPY . .
-
-
-# Production stage
 FROM node:20-bookworm-slim
 
 WORKDIR /app
+ENV NODE_ENV=production
 
-# Install aria2c and other tools
-RUN apk add --no-cache aria2 curl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  aria2 curl \
+  && rm -rf /var/lib/apt/lists/*
 
-# Copy package files
 COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Install production dependencies only
-RUN npm ci --production
-
-# Copy source code
 COPY . .
 
-# Create downloads directory
-RUN mkdir -p /downloads
-
-# Create worker script folder
-RUN mkdir -p /app/scripts
-
-# Start worker with ts-node
-CMD ["npx", "ts-node", "scripts/worker-start.ts"]
+CMD ["node", "worker.js"]
