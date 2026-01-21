@@ -126,16 +126,40 @@ echo ""
 echo "Step 4: Initializing Admin User"
 echo "======================================"
 
-# Wait a bit more for app to be ready
-sleep 5
+# Wait for app to be fully ready
+echo "Waiting for app to be ready..."
+sleep 10
 
-# Run init-admin script
-docker compose exec -T app node src/scripts/init-admin.js
+# Try to reach the app
+until curl -k -s https://faster.p.dishis.tech > /dev/null 2>&1; do
+    echo "Waiting for app..."
+    sleep 2
+done
 
-if [ $? -ne 0 ]; then
-    echo "⚠️  Warning: Admin initialization failed"
-    echo "You can manually create admin later with:"
-    echo "  docker-compose exec app node src/scripts/init-admin.js"
+echo "App is ready, creating admin user..."
+
+# Get NEXTAUTH_SECRET from .env
+source .env
+
+# Create admin via API
+response=$(curl -k -s -X POST https://faster.p.dishis.tech/api/init-admin \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"secret\": \"$NEXTAUTH_SECRET\",
+    \"email\": \"$INITIAL_ADMIN_EMAIL\",
+    \"password\": \"$INITIAL_ADMIN_PASSWORD\"
+  }")
+
+if echo "$response" | grep -q "success\|already exists"; then
+    echo "✓ Admin user initialized"
+else
+    echo "⚠️  Warning: Admin initialization may have failed"
+    echo "Response: $response"
+    echo ""
+    echo "You can manually create admin by visiting:"
+    echo "  curl -k -X POST https://faster.p.dishis.tech/api/init-admin \\"
+    echo "    -H 'Content-Type: application/json' \\"
+    echo "    -d '{\"secret\": \"YOUR_NEXTAUTH_SECRET\", \"email\": \"admin@example.com\", \"password\": \"yourpassword\"}'"
 fi
 
 
