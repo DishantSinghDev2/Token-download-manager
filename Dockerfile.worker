@@ -1,9 +1,10 @@
-FROM node:20-alpine
-
-# Install aria2c
-RUN apk add --no-cache aria2 curl
+# Playwright base image (includes Chromium + deps)
+FROM mcr.microsoft.com/playwright:v1.41.2-jammy
 
 WORKDIR /app
+
+# Install aria2 + curl
+RUN apt-get update && apt-get install -y aria2 curl && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
 RUN npm ci

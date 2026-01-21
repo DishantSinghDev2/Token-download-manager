@@ -56,7 +56,6 @@ function looksLikeHtml(data: string) {
   const s = data.trim().toLowerCase()
   if (!s) return false
 
-  // common "you got blocked" HTML pages
   return (
     s.startsWith('<!doctype html') ||
     s.startsWith('<html') ||
@@ -86,7 +85,7 @@ function extractRedirectUrlFromHtml(html: string): string | null {
   return null
 }
 
-async function readFirstBytes(file: string, max = 5000) {
+async function readFirstBytes(file: string, max = 8000) {
   try {
     const buf = await fs.readFile(file)
     return buf.slice(0, max).toString('utf8')
@@ -100,11 +99,10 @@ function getDefaultClientHeaders(referer?: string) {
     process.env.DOWNLOAD_UA ||
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
-  // never domain-hardcode here. keep it generic.
   const ref =
     referer ||
     process.env.DOWNLOAD_REFERER ||
-    'https://www.google.com/' // harmless default
+    'https://www.google.com/'
 
   return {
     ua,
@@ -135,6 +133,101 @@ async function execCmd(cmd: string, args: string[]) {
   return { code, out, err }
 }
 
+function shouldFallbackOnHttpStatus(status: number | null) {
+  if (!status) return false
+  return [498, 429, 403, 401, 400, 451].includes(status)
+}
+
+/**
+ * The only real way to solve MixDrop/DoodStream/Filemoon/etc.
+ * This tries to sniff the real file URL after JS runs.
+ */
+async function resolveWithBrowser(url: string): Promise<string> {
+  const { chromium } = await import('playwright')
+
+  const browser = await chromium.launch({ headless: true })
+  const page = await browser.newPage()
+
+  let directUrl: string | null = null
+
+  page.on('response', (res) => {
+    try {
+      const u = res.url()
+      if (!u.startsWith('http')) return
+
+      const status = res.status()
+      const ct = (res.headers()['content-type'] || '').toLowerCase()
+
+      const maybeFile =
+        (status === 200 || status === 206) &&
+        !ct.includes('text/html') &&
+        !ct.includes('application/xhtml') &&
+        !ct.includes('text/plain')
+
+      if (maybeFile) directUrl = u
+    } catch {}
+  })
+
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+
+  // let scripts/timers do their thing
+  await page.waitForTimeout(7000)
+
+  // try some generic clicks
+  const clickables = [
+    'a[download]',
+    'a[href*="download"]',
+    'button:has-text("Download")',
+    'a:has-text("Download")',
+    'button:has-text("Free Download")',
+    'a:has-text("Free Download")',
+  ]
+
+  for (const sel of clickables) {
+    if (directUrl) break
+    try {
+      const el = await page.$(sel)
+      if (el) {
+        await el.click({ timeout: 3000 })
+        await page.waitForTimeout(5000)
+      }
+    } catch {}
+  }
+
+  if (!directUrl) {
+    try {
+      // look for nice looking links in DOM
+      const hrefs = await page.$$eval('a[href]', (as) =>
+        as.map((a) => a.getAttribute('href') || '')
+      )
+
+      const guess = hrefs.find((h) => {
+        const x = h.toLowerCase()
+        return (
+          x.includes('download') ||
+          x.includes('.zip') ||
+          x.includes('.rar') ||
+          x.includes('.7z') ||
+          x.includes('.mp4') ||
+          x.includes('.mkv') ||
+          x.includes('.exe') ||
+          x.includes('.dmg')
+        )
+      })
+
+      if (guess) directUrl = new URL(guess, url).toString()
+    } catch {}
+  }
+
+  await browser.close()
+
+  if (!directUrl) {
+    throw new Error('Browser fallback could not resolve real download url (JS locked)')
+  }
+
+  return directUrl
+}
+
 async function runCurlSmartDownload(opts: {
   url: string
   outputFile: string
@@ -158,32 +251,26 @@ async function runCurlSmartDownload(opts: {
     const head = await readFirstBytes(opts.outputFile, 8000)
     if (!head) return
 
+    // got real file
     if (!looksLikeHtml(head)) return
 
+    // try extracting direct redirect from HTML
     const redirect = extractRedirectUrlFromHtml(head)
-    if (!redirect) {
-      throw new Error(
-        `curl downloaded HTML instead of file (no redirect found). Possibly blocked.\nhead=${head.slice(
-          0,
-          400
-        )}`
-      )
+    if (redirect) {
+      try {
+        currentUrl = new URL(redirect, currentUrl).toString()
+      } catch {
+        currentUrl = redirect
+      }
+      continue
     }
 
-    // support relative redirects
-    try {
-      currentUrl = new URL(redirect, currentUrl).toString()
-    } catch {
-      currentUrl = redirect
-    }
+    // no redirect? it's a JS locked page, use headless browser
+    const real = await resolveWithBrowser(currentUrl)
+    currentUrl = real
   }
 
-  throw new Error('Too many HTML redirect hops while using curl fallback')
-}
-
-function shouldFallbackOnHttpStatus(status: number | null) {
-  if (!status) return false
-  return [498, 429, 403, 401, 400, 451].includes(status)
+  throw new Error('Too many redirect steps while using curl smart download')
 }
 
 async function processDownload(job: Job<DownloadJobData>) {
@@ -215,17 +302,13 @@ async function processDownload(job: Job<DownloadJobData>) {
     let peers = 0
     let uploadSpeed = 0
 
-    // resolve HTTP redirects early (no harm)
     if (!isTorrent) {
       const finalUrl = await resolveFinalUrl(inputUrl)
       if (finalUrl && finalUrl !== inputUrl) {
         redirectedUrl = finalUrl
-
         await db.collection<Download>('downloads').updateOne(
           { _id: new ObjectId(downloadId) },
-          {
-            $set: { redirectedUrl, updatedAt: new Date() },
-          }
+          { $set: { redirectedUrl, updatedAt: new Date() } }
         )
       }
     }
@@ -289,30 +372,24 @@ async function processDownload(job: Job<DownloadJobData>) {
       const output = data.toString()
       console.log(`aria2c stdout: ${output}`)
 
-      // redirect detection from aria output
       const redirectMatch =
         output.match(/Redirecting to (https?:\/\/\S+)/i) ||
         output.match(/Location:\s*(https?:\/\/\S+)/i)
 
       if (redirectMatch) {
         redirectedUrl = redirectMatch[1].trim() || ''
-
         await db.collection<Download>('downloads').updateOne(
           { _id: new ObjectId(downloadId) },
           { $set: { redirectedUrl, updatedAt: new Date() } }
         )
       }
 
-      // Parse HTTP status (status=498 etc)
       const statusMatch = output.match(/status=(\d{3})/)
       if (statusMatch) {
         lastHttpStatus = parseInt(statusMatch[1])
-        if (shouldFallbackOnHttpStatus(lastHttpStatus)) {
-          shouldFallbackCurl = true
-        }
+        if (shouldFallbackOnHttpStatus(lastHttpStatus)) shouldFallbackCurl = true
       }
 
-      // Torrent metrics
       if (isTorrent) {
         const seedersMatch = output.match(/SEEDER:(\d+)/)
         const peersMatch = output.match(/PEER:(\d+)/)
@@ -323,7 +400,6 @@ async function processDownload(job: Job<DownloadJobData>) {
         if (uploadMatch) uploadSpeed = parseSizeToBytes(uploadMatch[1])
       }
 
-      // parse progress
       const downloadMatch = output.match(/\((\d+)%\)/)
       const speedMatch = output.match(/DL:([0-9.]+[KMG]?i?B)/)
       const sizeMatch = output.match(/SIZE:([0-9.]+[KMG]?i?B)/)
@@ -345,9 +421,9 @@ async function processDownload(job: Job<DownloadJobData>) {
 
       const now = Date.now()
 
-      // redis progress
       if (now - lastRedisUpdate >= 1000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
+
         const progress: any = {
           downloadId,
           status: 'downloading',
@@ -360,9 +436,7 @@ async function processDownload(job: Job<DownloadJobData>) {
 
         if (redirectedUrl) progress.redirectedUrl = redirectedUrl
 
-        if (isTorrent) {
-          progress.torrentInfo = { seeders, peers, uploadSpeed }
-        }
+        if (isTorrent) progress.torrentInfo = { seeders, peers, uploadSpeed }
 
         await redis.setEx(
           `download:progress:${downloadId}`,
@@ -373,9 +447,9 @@ async function processDownload(job: Job<DownloadJobData>) {
         lastRedisUpdate = now
       }
 
-      // mongo progress
       if (now - lastMongoUpdate >= 5000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
+
         const updateData: any = {
           totalBytes,
           downloadedBytes,
@@ -403,9 +477,7 @@ async function processDownload(job: Job<DownloadJobData>) {
       const statusMatch = s.match(/status=(\d{3})/)
       if (statusMatch) {
         lastHttpStatus = parseInt(statusMatch[1])
-        if (shouldFallbackOnHttpStatus(lastHttpStatus)) {
-          shouldFallbackCurl = true
-        }
+        if (shouldFallbackOnHttpStatus(lastHttpStatus)) shouldFallbackCurl = true
       }
     })
 
@@ -413,24 +485,20 @@ async function processDownload(job: Job<DownloadJobData>) {
       aria2c.on('close', (code) => resolve(code || 0))
     })
 
-    // fallback
     if (!isTorrent && (shouldFallbackCurl || shouldFallbackOnHttpStatus(lastHttpStatus))) {
-      console.log(
-        `aria2 failed/block status=${lastHttpStatus}, switching to curl smart download...`
-      )
+      console.log(`aria2 blocked status=${lastHttpStatus}, using curl smart download...`)
 
       await runCurlSmartDownload({
         url: finalUrl,
         outputFile,
         downloadPath,
         headers,
-        maxRedirectSteps: 3,
+        maxRedirectSteps: 4,
       })
     } else if (exitCode !== 0) {
       throw new Error(`aria2c exited with code ${exitCode}`)
     }
 
-    // locate the file
     const files = await fs.readdir(downloadPath)
 
     const downloadedFile =
@@ -442,20 +510,12 @@ async function processDownload(job: Job<DownloadJobData>) {
       }) || filename
 
     const finalOutputFile = path.join(downloadPath, downloadedFile)
-
-    // verify file exists
     const stats = await fs.stat(finalOutputFile)
     const finalSize = stats.size
 
-    // check it's not HTML trap
-    const head = await readFirstBytes(finalOutputFile, 4000)
+    const head = await readFirstBytes(finalOutputFile, 5000)
     if (head && looksLikeHtml(head)) {
-      const red = extractRedirectUrlFromHtml(head)
-      throw new Error(
-        `Downloaded content is HTML, not the actual file.${
-          red ? ` Detected redirect=${red}` : ''
-        }`
-      )
+      throw new Error('Downloaded content is HTML/blocked page, not the actual file.')
     }
 
     const publicUrl = `${APP_URL}/d/${path.basename(
