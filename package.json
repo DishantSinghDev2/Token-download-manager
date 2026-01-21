@@ -6,8 +6,8 @@
     "build": "next build",
     "db:init-indexes": "ts-node scripts/init-mongodb.ts",
     "dev": "next dev",
-    "init-admin": "ts-node scripts/init-admin.ts",
-    "init-db": "ts-node scripts/init-mongodb.ts",
+    "init-db": "node scripts/init-mongodb.js",
+    "init-admin": "node scripts/init-admin.js",
     "lint": "eslint .",
     "start": "next start"
   },

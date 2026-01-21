@@ -41,10 +41,10 @@ docker compose up -d
 sleep 10
 
 # Initialize MongoDB
-docker exec tdm_app npm run init-db
+docker exec -it tdm_app npm run init-db
 
-# Create initial admin user (optional - or use API)
-docker exec tdm_app node -e "require('./scripts/init-admin.js')"
+docker exec -it tdm_app npm run init-admin
+
 ```
 
 ### 4. Setup SSL Certificate
