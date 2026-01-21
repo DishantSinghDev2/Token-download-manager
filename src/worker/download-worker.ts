@@ -89,7 +89,6 @@ async function processDownload(job: Job<DownloadJobData>) {
       '--summary-interval=1',
       '--continue=true',
       '--allow-overwrite=true',
-      '--max-redirection=10',
       `--dir=${downloadPath}`,
       `--out=${filename}`,
       inputUrl,
