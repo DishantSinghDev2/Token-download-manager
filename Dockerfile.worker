@@ -11,5 +11,6 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
+RUN npm run build:scripts
 
-CMD ["node", "worker.js"]
+CMD ["npm", "run", "worker"]

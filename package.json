@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "build": "next build",
-    "db:init-indexes": "ts-node scripts/init-mongodb.ts",
+    "build:scripts": "tsc -p tsconfig.scripts.json && tsc-alias -p tsconfig.scripts.json",
+    "init-db": "node dist-scripts/init-mongodb.js",
+    "init-admin": "node dist-scripts/init-admin.js",
+    "worker": "node dist-scripts/worker-start.js",
     "dev": "next dev",
-    "init-db": "node scripts/init-mongodb.js",
-    "init-admin": "node scripts/init-admin.js",
-    "lint": "eslint .",
-    "start": "next start"
+    "start": "next start",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@auth/core": "latest",
@@ -84,6 +85,7 @@
     "postcss": "^8.5",
     "tailwindcss": "^4.1.9",
     "ts-node": "^10.9.2",
+    "tsc-alias": "^1.8.16",
     "tw-animate-css": "1.3.3",
     "typescript": "^5.9.3"
   }
