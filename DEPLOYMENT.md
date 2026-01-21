@@ -35,7 +35,7 @@ Edit `.env` and set:
 
 ```bash
 # Build and start services
-docker-compose up -d
+docker compose up -d
 
 # Wait for services to be ready
 sleep 10
