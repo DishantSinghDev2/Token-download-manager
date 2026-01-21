@@ -7,7 +7,7 @@ export async function getRedisClient(): Promise<RedisClientType> {
     return redisClient;
   }
 
-  const url = process.env.REDIS_URL;
+  const url = process.env.REDIS_URL ?? 'redis://redis:6379';
   if (!url) {
     throw new Error('REDIS_URL is not defined');
   }
