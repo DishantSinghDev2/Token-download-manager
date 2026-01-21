@@ -75,8 +75,8 @@ services:
       # qbit credentials + host
       - QBIT_HOST=qbittorrent
       - QBIT_PORT=8080
-      - QBIT_USERNAME=${INITIAL_ADMIN_EMAIL}
-      - QBIT_PASSWORD=${INITIAL_ADMIN_PASSWORD}
+      - QBIT_USERNAME=${QBIT_USERNAME}
+      - QBIT_PASSWORD=${QBIT_PASSWORD}
     volumes:
       - downloads:/downloads
     depends_on:
