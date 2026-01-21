@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
 # Install aria2c
-RUN apk add --no-cache aria2
+RUN apk add --no-cache aria2 curl
 
 WORKDIR /app
 
