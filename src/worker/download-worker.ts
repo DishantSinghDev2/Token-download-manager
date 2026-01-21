@@ -86,11 +86,8 @@ function isProbablyRealFileResponse(headers: Record<string, string>, status: num
   if (![200, 206].includes(status)) return false
 
   if (cd.includes('attachment')) return true
-
-  // content-length big? almost always file
   if (cl && cl >= MIN_REAL_FILE_BYTES) return true
 
-  // sometimes content-length missing but content-type indicates file
   if (
     ct.includes('application/octet-stream') ||
     ct.includes('application/zip') ||
@@ -117,6 +114,33 @@ function isBadUrl(u: string) {
   )
 }
 
+function extractUrlFromAnyText(t: string): string | null {
+  const s = (t || '').trim()
+  if (!s) return null
+
+  try {
+    const j: any = JSON.parse(s)
+    const url =
+      j?.url ||
+      j?.data?.url ||
+      j?.result?.url ||
+      j?.download ||
+      j?.downloadUrl ||
+      j?.file ||
+      j?.direct ||
+      j?.link
+    if (typeof url === 'string' && url.startsWith('http')) return url
+  } catch {}
+
+  const m1 = s.match(/['"]url['"]\s*:\s*['"]([^'"]+)['"]/i)
+  if (m1?.[1] && m1[1].startsWith('http')) return m1[1]
+
+  const m2 = s.match(/https?:\/\/[^\s"'<>]+/i)
+  if (m2?.[0]) return m2[0]
+
+  return null
+}
+
 async function resolveWithBrowser(
   url: string
 ): Promise<{ directUrl: string; cookies?: string; referer?: string }> {
@@ -133,7 +157,6 @@ async function resolveWithBrowser(
 
   const page = await context.newPage()
 
-  // block obvious ad/tracker calls
   await page.route('**/*', async (route) => {
     const reqUrl = route.request().url()
     if (isBadUrl(reqUrl)) return route.abort()
@@ -143,7 +166,6 @@ async function resolveWithBrowser(
   let directUrl: string | null = null
   let directReferer: string | undefined
 
-  // 1) sniff real file responses
   page.on('response', async (res) => {
     try {
       const u = res.url()
@@ -156,14 +178,26 @@ async function resolveWithBrowser(
       if (isProbablyRealFileResponse(headers, status)) {
         directUrl = u
         directReferer = page.url()
+        return
+      }
+
+      const ct = (headers['content-type'] || '').toLowerCase()
+      if (ct.includes('application/json') || ct.includes('text/javascript') || ct.includes('text/plain')) {
+        const body = await res.text().catch(() => '')
+        const extracted = extractUrlFromAnyText(body)
+        if (extracted && extracted.startsWith('http') && !isBadUrl(extracted)) {
+          directUrl = extracted
+          directReferer = page.url()
+        }
       }
     } catch {}
   })
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
-  await page.waitForTimeout(5000)
 
-  // 2) try triggering actual file download using download event
+  // timers, anti-bot, etc.
+  await page.waitForTimeout(12_000)
+
   const tryClicks = [
     'a[download]',
     'a[href*="download"]',
@@ -180,7 +214,7 @@ async function resolveWithBrowser(
       if (!el) continue
 
       const dl = await Promise.race([
-        page.waitForEvent('download', { timeout: 12_000 }).catch(() => null),
+        page.waitForEvent('download', { timeout: 15_000 }).catch(() => null),
         (async () => {
           await el.click({ timeout: 3000 })
           return null
@@ -196,16 +230,18 @@ async function resolveWithBrowser(
         }
       }
 
-      await page.waitForTimeout(5000)
+      await page.waitForTimeout(10_000)
     } catch {}
   }
 
-  // 3) last try: find best looking link on page
+  // longer wait for API token generation
+  if (!directUrl) {
+    await page.waitForTimeout(20_000)
+  }
+
   if (!directUrl) {
     try {
-      const hrefs = await page.$$eval('a[href]', (as) =>
-        as.map((a) => a.getAttribute('href') || '')
-      )
+      const hrefs = await page.$$eval('a[href]', (as) => as.map((a) => a.getAttribute('href') || ''))
 
       const guess = hrefs
         .map((h) => h.trim())
@@ -239,9 +275,7 @@ async function resolveWithBrowser(
   }
 
   const cookieHeader =
-    cookiesArr.length > 0
-      ? cookiesArr.map((c) => `${c.name}=${c.value}`).join('; ')
-      : undefined
+    cookiesArr.length > 0 ? cookiesArr.map((c) => `${c.name}=${c.value}`).join('; ') : undefined
 
   return { directUrl, cookies: cookieHeader, referer: directReferer }
 }
