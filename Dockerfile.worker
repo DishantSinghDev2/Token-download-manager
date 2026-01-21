@@ -1,9 +1,7 @@
-# Playwright base image (includes Chromium + deps)
-FROM mcr.microsoft.com/playwright:v1.41.2-jammy
+FROM mcr.microsoft.com/playwright:v1.57.0-jammy
 
 WORKDIR /app
 
-# Install aria2 + curl
 RUN apt-get update && apt-get install -y aria2 curl && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
