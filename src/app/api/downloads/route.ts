@@ -20,13 +20,18 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate URL
-    const urlValidation = validateUrl(url)
-    if (!urlValidation.valid) {
-      return NextResponse.json(
-        { error: urlValidation.error },
-        { status: 400 }
-      )
+    // Check if it's a torrent/magnet link
+    const isTorrent = url.startsWith('magnet:') || url.endsWith('.torrent')
+
+    // Validate URL for non-torrents
+    if (!isTorrent) {
+      const urlValidation = validateUrl(url)
+      if (!urlValidation.valid) {
+        return NextResponse.json(
+          { error: urlValidation.error },
+          { status: 400 }
+        )
+      }
     }
 
     const db = await getDb()
@@ -73,37 +78,42 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Try to get file size via HEAD request
+    // Try to get file size via HEAD request (skip for torrents)
     let fileSize = 0
-    try {
-      const headResponse = await fetch(url, { method: 'HEAD' })
-      const contentLength = headResponse.headers.get('content-length')
-      if (contentLength) {
-        fileSize = parseInt(contentLength)
+    if (!isTorrent) {
+      try {
+        const headResponse = await fetch(url, { method: 'HEAD' })
+        const contentLength = headResponse.headers.get('content-length')
+        if (contentLength) {
+          fileSize = parseInt(contentLength)
+        }
+      } catch (error) {
+        // If HEAD fails, we'll check size during download
+        console.warn('HEAD request failed, will check size during download')
       }
-    } catch (error) {
-      // If HEAD fails, we'll check size during download
-      console.warn('HEAD request failed, will check size during download')
-    }
 
-    // Check file size limit (if we got it)
-    if (fileSize > 0 && fileSize > tokenDoc.maxFileSizeBytes) {
-      return NextResponse.json(
-        { error: `File size exceeds limit of ${tokenDoc.maxFileSizeBytes} bytes` },
-        { status: 400 }
-      )
-    }
+      // Check file size limit (if we got it)
+      if (fileSize > 0 && fileSize > tokenDoc.maxFileSizeBytes) {
+        return NextResponse.json(
+          { error: `File size exceeds limit of ${tokenDoc.maxFileSizeBytes} bytes` },
+          { status: 400 }
+        )
+      }
 
-    // Check quota
-    if (fileSize > 0 && (tokenDoc.usedBytes + fileSize) > tokenDoc.totalQuotaBytes) {
-      return NextResponse.json(
-        { error: 'Insufficient quota remaining' },
-        { status: 403 }
-      )
+      // Check quota
+      if (fileSize > 0 && (tokenDoc.usedBytes + fileSize) > tokenDoc.totalQuotaBytes) {
+        return NextResponse.json(
+          { error: 'Insufficient quota remaining' },
+          { status: 403 }
+        )
+      }
     }
 
     // Create download record
-    const filename = getFilenameFromUrl(url)
+    const filename = isTorrent ? 
+      (url.startsWith('magnet:') ? 'torrent-download' : getFilenameFromUrl(url)) :
+      getFilenameFromUrl(url)
+      
     const downloadDoc: Download = {
       tokenId: tokenDoc._id!,
       inputUrl: url,
@@ -135,6 +145,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       downloadId,
+      isTorrent,
     })
   } catch (error: any) {
     console.error('Error creating download:', error)

@@ -17,8 +17,6 @@ interface TokenData {
   usedBytes: number
   expiresAt: string
   maxConcurrentDownloads: number
-  createdAt: string
-  updatedAt: string
 }
 
 interface DownloadData {
@@ -31,6 +29,12 @@ interface DownloadData {
   speed: number
   eta: number
   publicUrl?: string
+  redirectedUrl?: string
+  torrentInfo?: {
+    seeders: number
+    peers: number
+    uploadSpeed: number
+  }
   createdAt: string
 }
 
@@ -164,16 +168,19 @@ export default function TokenPortal({
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="url">Download URL</Label>
+                <Label htmlFor="url">Download URL or Magnet Link</Label>
                 <Input
                   id="url"
-                  type="url"
-                  placeholder="https://example.com/file.zip"
+                  type="text"
+                  placeholder="https://example.com/file.zip or magnet:?xt=urn:btih:..."
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   required
                   disabled={isSubmitting || activeDownloads >= token.maxConcurrentDownloads}
                 />
+                <p className="text-xs text-muted-foreground">
+                  Supports HTTP, HTTPS, Magnet links, and .torrent files
+                </p>
               </div>
               <Button 
                 type="submit" 
@@ -220,6 +227,30 @@ export default function TokenPortal({
                         {download.status.toUpperCase()}
                       </span>
                     </div>
+
+                    {download.redirectedUrl && (
+                      <div className="bg-yellow-50 border border-yellow-200 rounded p-2 text-sm">
+                        <p className="font-semibold text-yellow-800 mb-1">🔄 Redirect Detected</p>
+                        <p className="text-yellow-700 break-all">{download.redirectedUrl}</p>
+                      </div>
+                    )}
+
+                    {download.torrentInfo && download.status === 'downloading' && (
+                      <div className="bg-purple-50 border border-purple-200 rounded p-2 text-sm">
+                        <p className="font-semibold text-purple-800 mb-1">🌱 Torrent Info</p>
+                        <div className="grid grid-cols-3 gap-2 text-xs text-purple-700">
+                          <div>
+                            <span className="font-medium">Seeders:</span> {download.torrentInfo.seeders}
+                          </div>
+                          <div>
+                            <span className="font-medium">Peers:</span> {download.torrentInfo.peers}
+                          </div>
+                          <div>
+                            <span className="font-medium">Upload:</span> {formatSpeed(download.torrentInfo.uploadSpeed)}
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {download.status === 'downloading' && (
                       <>

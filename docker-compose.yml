@@ -46,6 +46,9 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     restart: always
+    ports:
+      - "6881-6889:6881-6889" # BitTorrent ports
+      - "6881-6889:6881-6889/udp" # DHT ports
     environment:
       - NEXT_PUBLIC_APP_URL=https://faster.p.dishis.tech
       - MONGODB_URI=mongodb://mongo:27017/token-download-manager
