@@ -1,51 +1,43 @@
-import type { NextAuthOptions } from "next-auth";
-import CredentialsProvider from "next-auth/providers/credentials";
-import { authenticateAdmin } from "./auth";
+import { type NextAuthConfig } from 'next-auth';
+import Credentials from 'next-auth/providers/credentials';
+import { authenticateAdmin } from './auth';
 
-export const authConfig: NextAuthOptions = {
+export const authConfig = {
   pages: {
-    signIn: "/admin/login",
+    signIn: '/admin/login',
   },
+  callbacks: {
+    authorized({ auth, request }) {
+      const isLoggedIn = !!auth?.user;
+      const isOnAdminPage = request.nextUrl.pathname.startsWith('/admin');
 
-  session: { strategy: "jwt" },
+      if (isOnAdminPage) {
+        return isLoggedIn;
+      }
 
+      return true;
+    },
+  },
   providers: [
-    CredentialsProvider({
-      name: "Credentials",
-      credentials: {
-        email: { label: "Email", type: "text" },
-        password: { label: "Password", type: "password" },
-      },
-
+    Credentials({
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) return null;
+        if (!credentials?.email || !credentials?.password) {
+          throw new Error('Invalid credentials');
+        }
 
-        const admin = await authenticateAdmin(
-          credentials.email,
-          credentials.password
-        );
+        const admin = await authenticateAdmin(credentials.email as string, credentials.password as string);
 
-        if (!admin) return null;
+        if (!admin) {
+          throw new Error('Invalid email or password');
+        }
 
         return {
           id: admin.email,
           email: admin.email,
           name: admin.email,
           role: admin.role,
-        } as any;
+        };
       },
     }),
   ],
-
-  callbacks: {
-    async jwt({ token, user }: any) {
-      if (user?.role) token.role = user.role;
-      return token;
-    },
-
-    async session({ session, token }: any) {
-      if (session?.user) (session.user as any).role = token.role;
-      return session;
-    },
-  },
-};
+} satisfies NextAuthConfig;
