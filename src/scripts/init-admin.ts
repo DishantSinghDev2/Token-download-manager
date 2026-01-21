@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs'
-import { getDb } from './lib/mongodb'
-import { Admin } from './lib/models'
+import { getDb } from '../lib/mongodb'
+import { Admin } from '../lib/models'
 
 async function initializeAdmin() {
   const email = process.env.INITIAL_ADMIN_EMAIL
