@@ -23,6 +23,86 @@ function isTorrentUrl(url: string): boolean {
   return url.startsWith('magnet:') || url.endsWith('.torrent')
 }
 
+function parseSizeToBytes(sizeStr: string): number {
+  const match = sizeStr.match(/^([0-9.]+)([KMG]?i?B)$/)
+  if (!match) return 0
+
+  const value = parseFloat(match[1])
+  const unit = match[2]
+
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1000,
+    KiB: 1024,
+    MB: 1000 * 1000,
+    MiB: 1024 * 1024,
+    GB: 1000 * 1000 * 1000,
+    GiB: 1024 * 1024 * 1024,
+  }
+
+  return Math.floor(value * (multipliers[unit] || 1))
+}
+
+async function resolveFinalUrl(url: string): Promise<string> {
+  try {
+    const res = await fetch(url, { method: 'HEAD', redirect: 'follow' })
+    return res.url || url
+  } catch {
+    return url
+  }
+}
+
+function getDefaultBrowserHeaders(referer?: string) {
+  const ua =
+    process.env.DOWNLOAD_UA ||
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+
+  const ref = referer || process.env.DOWNLOAD_REFERER || 'https://mxcontent.net/'
+
+  return {
+    ua,
+    referer: ref,
+    ariaArgs: [
+      `--user-agent=${ua}`,
+      `--referer=${ref}`,
+      '--header=Accept: */*',
+      '--header=Connection: keep-alive',
+    ],
+    curlArgs: ['-A', ua, '-e', ref, '-L'],
+  }
+}
+
+async function runCurlDownload(opts: {
+  url: string
+  outputFile: string
+  downloadPath: string
+  headers: ReturnType<typeof getDefaultBrowserHeaders>
+}) {
+  await fs.mkdir(opts.downloadPath, { recursive: true })
+
+  const args = [
+    ...opts.headers.curlArgs,
+    '-o',
+    opts.outputFile,
+    opts.url,
+  ]
+
+  const curl = spawn('curl', args)
+
+  let errBuf = ''
+  curl.stderr.on('data', (d) => {
+    errBuf += d.toString()
+  })
+
+  const exitCode = await new Promise<number>((resolve) => {
+    curl.on('close', (code) => resolve(code || 0))
+  })
+
+  if (exitCode !== 0) {
+    throw new Error(`curl failed (code ${exitCode}): ${errBuf.slice(0, 500)}`)
+  }
+}
+
 async function processDownload(job: Job<DownloadJobData>) {
   const { downloadId, tokenId, inputUrl, filename, downloadPath } = job.data
 
@@ -32,7 +112,6 @@ async function processDownload(job: Job<DownloadJobData>) {
   const redis = await getRedisClient()
 
   try {
-    // Update status to downloading
     await db.collection<Download>('downloads').updateOne(
       { _id: new ObjectId(downloadId) },
       {
@@ -43,10 +122,8 @@ async function processDownload(job: Job<DownloadJobData>) {
       }
     )
 
-    // Create download directory
     await fs.mkdir(downloadPath, { recursive: true })
 
-    const outputFile = path.join(downloadPath, filename)
     const isTorrent = isTorrentUrl(inputUrl)
 
     let redirectedUrl: string | null = null
@@ -54,68 +131,96 @@ async function processDownload(job: Job<DownloadJobData>) {
     let peers = 0
     let uploadSpeed = 0
 
-    // Build aria2c command based on type
-    const aria2cArgs = isTorrent ? [
-      // Torrent-specific options
-      '--enable-dht=true',
-      '--bt-enable-lpd=true',
-      '--enable-peer-exchange=true',
-      '--seed-time=0', // Don't seed after download
-      '--bt-max-peers=100',
-      '--bt-request-peer-speed-limit=10M',
-      '--max-upload-limit=1K', // Minimal upload (1KB/s)
-      '--bt-seed-unverified=false',
-      '--bt-save-metadata=true',
-      '--bt-hash-check-seed=true',
-      '--bt-detach-seed-only=true',
-      `--listen-port=6881-6889`, // BT ports
-      '--dht-listen-port=6881-6889',
-      '--follow-torrent=mem',
-      '--split=16',
-      '--max-connection-per-server=16',
-      '--min-split-size=1M',
-      '--file-allocation=none',
-      '--summary-interval=1',
-      '--continue=true',
-      '--allow-overwrite=true',
-      `--dir=${downloadPath}`,
-      inputUrl,
-    ] : [
-      // HTTP/HTTPS options
-      '--split=16',
-      '--max-connection-per-server=16',
-      '--min-split-size=1M',
-      '--file-allocation=none',
-      '--summary-interval=1',
-      '--continue=true',
-      '--allow-overwrite=true',
-      `--dir=${downloadPath}`,
-      `--out=${filename}`,
-      inputUrl,
-    ]
+    // Resolve final url for protected redirects (HTTP only)
+    if (!isTorrent) {
+      const finalUrl = await resolveFinalUrl(inputUrl)
+      if (finalUrl && finalUrl !== inputUrl) {
+        redirectedUrl = finalUrl
 
-    // Start aria2c download
+        await db.collection<Download>('downloads').updateOne(
+          { _id: new ObjectId(downloadId) },
+          {
+            $set: {
+              redirectedUrl,
+              updatedAt: new Date(),
+            },
+          }
+        )
+      }
+    }
+
+    const finalUrl = redirectedUrl || inputUrl
+
+    const outputFile = path.join(downloadPath, filename)
+
+    // browser-like headers for protected cdn
+    const headers = getDefaultBrowserHeaders()
+
+    // Build aria2c command based on type
+    const aria2cArgs = isTorrent
+      ? [
+          '--enable-dht=true',
+          '--bt-enable-lpd=true',
+          '--enable-peer-exchange=true',
+          '--seed-time=0',
+          '--bt-max-peers=100',
+          '--bt-request-peer-speed-limit=10M',
+          '--max-upload-limit=1K',
+          '--bt-seed-unverified=false',
+          '--bt-save-metadata=true',
+          '--bt-hash-check-seed=true',
+          '--bt-detach-seed-only=true',
+          '--listen-port=6881-6889',
+          '--dht-listen-port=6881-6889',
+          '--follow-torrent=mem',
+          '--split=16',
+          '--max-connection-per-server=16',
+          '--min-split-size=1M',
+          '--file-allocation=none',
+          '--summary-interval=1',
+          '--continue=true',
+          '--allow-overwrite=true',
+          `--dir=${downloadPath}`,
+          finalUrl,
+        ]
+      : [
+          ...headers.ariaArgs,
+          '--split=16',
+          '--max-connection-per-server=16',
+          '--min-split-size=1M',
+          '--file-allocation=none',
+          '--summary-interval=1',
+          '--continue=true',
+          '--allow-overwrite=true',
+          `--dir=${downloadPath}`,
+          `--out=${filename}`,
+          finalUrl,
+        ]
+
     const aria2c = spawn('aria2c', aria2cArgs)
 
-    let lastUpdate = Date.now()
+    let lastRedisUpdate = Date.now()
+    let lastMongoUpdate = Date.now()
+
     let totalBytes = 0
     let downloadedBytes = 0
     let speed = 0
+
+    let shouldFallbackCurl = false
+    let lastHttpStatus: number | null = null
 
     aria2c.stdout.on('data', async (data) => {
       const output = data.toString()
       console.log(`aria2c stdout: ${output}`)
 
-      // Detect redirects
+      // Redirect detection
       const redirectMatch =
         output.match(/Redirecting to (https?:\/\/\S+)/i) ||
         output.match(/Location:\s*(https?:\/\/\S+)/i)
 
       if (redirectMatch) {
         redirectedUrl = redirectMatch[1].trim() || ''
-        console.log(`Redirect detected: ${redirectedUrl}`)
 
-        // Save redirect info to MongoDB
         await db.collection<Download>('downloads').updateOne(
           { _id: new ObjectId(downloadId) },
           {
@@ -127,7 +232,16 @@ async function processDownload(job: Job<DownloadJobData>) {
         )
       }
 
-      // Parse torrent-specific info
+      // Parse HTTP status (aria2 prints: status=498 etc)
+      const statusMatch = output.match(/status=(\d{3})/)
+      if (statusMatch) {
+        lastHttpStatus = parseInt(statusMatch[1])
+        if ([498, 403, 401, 429].includes(lastHttpStatus)) {
+          shouldFallbackCurl = true
+        }
+      }
+
+      // Parse torrent info
       if (isTorrent) {
         const seedersMatch = output.match(/SEEDER:(\d+)/)
         const peersMatch = output.match(/PEER:(\d+)/)
@@ -138,7 +252,7 @@ async function processDownload(job: Job<DownloadJobData>) {
         if (uploadMatch) uploadSpeed = parseSizeToBytes(uploadMatch[1])
       }
 
-      // Parse aria2c output for progress
+      // Parse progress
       const downloadMatch = output.match(/\((\d+)%\)/)
       const speedMatch = output.match(/DL:([0-9.]+[KMG]?i?B)/)
       const sizeMatch = output.match(/SIZE:([0-9.]+[KMG]?i?B)/)
@@ -162,9 +276,10 @@ async function processDownload(job: Job<DownloadJobData>) {
 
       const now = Date.now()
 
-      // Update Redis every second
-      if (now - lastUpdate >= 1000) {
+      // Redis progress (every 1 sec)
+      if (now - lastRedisUpdate >= 1000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
+
         const progress: any = {
           downloadId,
           status: 'downloading',
@@ -175,87 +290,101 @@ async function processDownload(job: Job<DownloadJobData>) {
           updatedAt: now,
         }
 
-        if (redirectedUrl) {
-          progress.redirectedUrl = redirectedUrl
-        }
+        if (redirectedUrl) progress.redirectedUrl = redirectedUrl
 
         if (isTorrent) {
-          progress.torrentInfo = {
-            seeders,
-            peers,
-            uploadSpeed,
-          }
+          progress.torrentInfo = { seeders, peers, uploadSpeed }
         }
 
         await redis.setEx(
           `download:progress:${downloadId}`,
-          300, // 5 minutes TTL
+          300,
           JSON.stringify(progress)
         )
 
-        // Update MongoDB every 5 seconds
-        if (now - lastUpdate >= 5000) {
-          const updateData: any = {
-            totalBytes,
-            downloadedBytes,
-            speed,
-            eta,
-            updatedAt: new Date(),
-          }
+        lastRedisUpdate = now
+      }
 
-          if (redirectedUrl) {
-            updateData.redirectedUrl = redirectedUrl
-          }
+      // Mongo progress (every 5 sec)
+      if (now - lastMongoUpdate >= 5000) {
+        const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
 
-          if (isTorrent) {
-            updateData.torrentInfo = {
-              seeders,
-              peers,
-              uploadSpeed,
-            }
-          }
-
-          await db.collection<Download>('downloads').updateOne(
-            { _id: new ObjectId(downloadId) },
-            { $set: updateData }
-          )
+        const updateData: any = {
+          totalBytes,
+          downloadedBytes,
+          speed,
+          eta,
+          updatedAt: new Date(),
         }
 
-        lastUpdate = now
+        if (redirectedUrl) updateData.redirectedUrl = redirectedUrl
+        if (isTorrent) updateData.torrentInfo = { seeders, peers, uploadSpeed }
+
+        await db.collection<Download>('downloads').updateOne(
+          { _id: new ObjectId(downloadId) },
+          { $set: updateData }
+        )
+
+        lastMongoUpdate = now
       }
     })
 
     aria2c.stderr.on('data', (data) => {
-      console.error(`aria2c stderr: ${data}`)
+      const s = data.toString()
+      console.error(`aria2c stderr: ${s}`)
+
+      const statusMatch = s.match(/status=(\d{3})/)
+      if (statusMatch) {
+        lastHttpStatus = parseInt(statusMatch[1])
+        if ([498, 403, 401, 429].includes(lastHttpStatus)) {
+          shouldFallbackCurl = true
+        }
+      }
     })
 
-    // Wait for aria2c to complete
     const exitCode = await new Promise<number>((resolve) => {
-      aria2c.on('close', (code) => {
-        resolve(code || 0)
-      })
+      aria2c.on('close', (code) => resolve(code || 0))
     })
 
-    if (exitCode !== 0) {
+    // Fallback: protected links (498/403/401/429)
+    if (!isTorrent && (shouldFallbackCurl || lastHttpStatus === 498)) {
+      console.log(
+        `aria2 failed with protected status=${lastHttpStatus}, falling back to curl...`
+      )
+
+      await runCurlDownload({
+        url: finalUrl,
+        outputFile,
+        downloadPath,
+        headers,
+      })
+    } else if (exitCode !== 0) {
       throw new Error(`aria2c exited with code ${exitCode}`)
     }
 
-    // Find the actual downloaded file (for torrents, filename might differ)
+    // Find actual downloaded file
     const files = await fs.readdir(downloadPath)
-    const downloadedFile = files.find(f => f !== '.aria2') || filename
+
+    const downloadedFile =
+      files.find(
+        (f) =>
+          f !== '.aria2' &&
+          !f.endsWith('.aria2') &&
+          f !== path.basename(downloadPath)
+      ) || filename
+
     const finalOutputFile = path.join(downloadPath, downloadedFile)
 
-    // Verify file exists
     const stats = await fs.stat(finalOutputFile)
     const finalSize = stats.size
 
-    // Generate public URL
-    const publicUrl = `${APP_URL}/d/${path.basename(path.dirname(downloadPath))}/${downloadId}/${downloadedFile}`
+    const publicUrl = `${APP_URL}/d/${path.basename(
+      path.dirname(downloadPath)
+    )}/${downloadId}/${downloadedFile}`
 
-    // Update download as completed
     const updateData: any = {
       status: 'completed',
-      filename: downloadedFile, // Update with actual filename
+      filename: downloadedFile,
       totalBytes: finalSize,
       downloadedBytes: finalSize,
       publicUrl,
@@ -263,16 +392,13 @@ async function processDownload(job: Job<DownloadJobData>) {
       updatedAt: new Date(),
     }
 
-    if (redirectedUrl) {
-      updateData.redirectedUrl = redirectedUrl
-    }
+    if (redirectedUrl) updateData.redirectedUrl = redirectedUrl
 
     await db.collection<Download>('downloads').updateOne(
       { _id: new ObjectId(downloadId) },
       { $set: updateData }
     )
 
-    // Update token usage
     await db.collection('tokens').updateOne(
       { _id: new ObjectId(tokenId) },
       {
@@ -281,12 +407,14 @@ async function processDownload(job: Job<DownloadJobData>) {
       }
     )
 
-    // Clean up Redis progress
     await redis.del(`download:progress:${downloadId}`)
 
     console.log(`Download ${downloadId} completed successfully`)
   } catch (error: any) {
     console.error(`Download ${downloadId} failed:`, error)
+
+    const db = await getDb()
+    const redis = await getRedisClient()
 
     await db.collection<Download>('downloads').updateOne(
       { _id: new ObjectId(downloadId) },
@@ -305,39 +433,15 @@ async function processDownload(job: Job<DownloadJobData>) {
   }
 }
 
-function parseSizeToBytes(sizeStr: string): number {
-  const match = sizeStr.match(/^([0-9.]+)([KMG]?i?B)$/)
-  if (!match) return 0
-
-  const value = parseFloat(match[1])
-  const unit = match[2]
-
-  const multipliers: Record<string, number> = {
-    'B': 1,
-    'KB': 1000,
-    'KiB': 1024,
-    'MB': 1000 * 1000,
-    'MiB': 1024 * 1024,
-    'GB': 1000 * 1000 * 1000,
-    'GiB': 1024 * 1024 * 1024,
-  }
-
-  return Math.floor(value * (multipliers[unit] || 1))
-}
-
 // Create worker
-const worker = new Worker<DownloadJobData>(
-  'downloads',
-  processDownload,
-  {
-    connection,
-    concurrency: 3,
-    limiter: {
-      max: 10,
-      duration: 1000,
-    },
-  }
-)
+const worker = new Worker<DownloadJobData>('downloads', processDownload, {
+  connection,
+  concurrency: 3,
+  limiter: {
+    max: 10,
+    duration: 1000,
+  },
+})
 
 worker.on('completed', (job) => {
   console.log(`Job ${job.id} completed`)
