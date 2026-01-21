@@ -41,25 +41,48 @@ services:
     networks:
       - app-network
 
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    restart: always
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Kolkata
+      - WEBUI_PORT=8080
+    volumes:
+      - downloads:/downloads
+      - qbittorrent-config:/config
+    ports:
+      - "8080:8080"         # qbit web ui (optional, for debugging)
+      - "51413:51413"       # torrent port TCP
+      - "51413:51413/udp"   # torrent port UDP
+    networks:
+      - app-network
+
   worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
     restart: always
-    ports:
-      - "6881-6889:6881-6889" # BitTorrent ports
-      - "6881-6889:6881-6889/udp" # DHT ports
     environment:
       - NEXT_PUBLIC_APP_URL=https://faster.p.dishis.tech
       - MONGODB_URI=mongodb://mongo:27017/token-download-manager
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - DOWNLOADS_DIR=/downloads
+
+      # qbit credentials + host
+      - QBIT_HOST=qbittorrent
+      - QBIT_PORT=8080
+      - QBIT_USERNAME=${INITIAL_ADMIN_EMAIL}
+      - QBIT_PASSWORD=${INITIAL_ADMIN_PASSWORD}
     volumes:
       - downloads:/downloads
     depends_on:
       - mongo
       - redis
+      - qbittorrent
     networks:
       - app-network
 
@@ -98,3 +121,4 @@ volumes:
   downloads:
   certbot-etc:
   certbot-var:
+  qbittorrent-config:

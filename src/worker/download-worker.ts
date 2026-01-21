@@ -18,7 +18,13 @@ const connection = {
 }
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://faster.p.dishis.tech'
-const MIN_REAL_FILE_BYTES = parseInt(process.env.MIN_REAL_FILE_BYTES || `${5 * 1024 * 1024}`) // 5MB
+const MIN_REAL_FILE_BYTES = parseInt(process.env.MIN_REAL_FILE_BYTES || `${5 * 1024 * 1024}`)
+
+const QBIT_HOST = process.env.QBIT_HOST || 'qbittorrent'
+const QBIT_PORT = parseInt(process.env.QBIT_PORT || '8080')
+const QBIT_USERNAME = process.env.QBIT_USERNAME || 'admin'
+const QBIT_PASSWORD = process.env.QBIT_PASSWORD || 'adminadmin'
+const QBIT_BASE = `http://${QBIT_HOST}:${QBIT_PORT}`
 
 function isTorrentUrl(url: string): boolean {
   return url.startsWith('magnet:') || url.endsWith('.torrent')
@@ -84,7 +90,6 @@ function isProbablyRealFileResponse(headers: Record<string, string>, status: num
   const cl = clRaw ? parseInt(clRaw) : 0
 
   if (![200, 206].includes(status)) return false
-
   if (cd.includes('attachment')) return true
   if (cl && cl >= MIN_REAL_FILE_BYTES) return true
 
@@ -141,9 +146,7 @@ function extractUrlFromAnyText(t: string): string | null {
   return null
 }
 
-async function resolveWithBrowser(
-  url: string
-): Promise<{ directUrl: string; cookies?: string; referer?: string }> {
+async function resolveWithBrowser(url: string): Promise<{ directUrl: string; cookies?: string; referer?: string }> {
   const { chromium } = await import('playwright')
 
   const browser = await chromium.launch({
@@ -194,8 +197,6 @@ async function resolveWithBrowser(
   })
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
-
-  // timers, anti-bot, etc.
   await page.waitForTimeout(12_000)
 
   const tryClicks = [
@@ -234,38 +235,7 @@ async function resolveWithBrowser(
     } catch {}
   }
 
-  // longer wait for API token generation
-  if (!directUrl) {
-    await page.waitForTimeout(20_000)
-  }
-
-  if (!directUrl) {
-    try {
-      const hrefs = await page.$$eval('a[href]', (as) => as.map((a) => a.getAttribute('href') || ''))
-
-      const guess = hrefs
-        .map((h) => h.trim())
-        .filter(Boolean)
-        .map((h) => {
-          try {
-            return new URL(h, url).toString()
-          } catch {
-            return ''
-          }
-        })
-        .find((h) => {
-          const x = h.toLowerCase()
-          if (!x.startsWith('http')) return false
-          if (isBadUrl(x)) return false
-          return x.includes('download') || x.includes('.zip') || x.includes('.mp4') || x.includes('.mkv')
-        })
-
-      if (guess) {
-        directUrl = guess
-        directReferer = page.url()
-      }
-    } catch {}
-  }
+  if (!directUrl) await page.waitForTimeout(20_000)
 
   const cookiesArr = await context.cookies()
   await browser.close()
@@ -304,12 +274,145 @@ async function aria2Download(opts: {
   args.push(opts.url)
 
   const p = spawn('aria2c', args)
-
   p.stdout.on('data', (d) => console.log(`aria2c stdout: ${d.toString()}`))
   p.stderr.on('data', (d) => console.error(`aria2c stderr: ${d.toString()}`))
 
   const code = await new Promise<number>((resolve) => p.on('close', (c) => resolve(c ?? 0)))
-  if (code !== 0) throw new Error(`aria2c (browser url) exited with code ${code}`)
+  if (code !== 0) throw new Error(`aria2c exited with code ${code}`)
+}
+
+async function qbitLogin(): Promise<string> {
+  const body = new URLSearchParams()
+  body.set('username', QBIT_USERNAME)
+  body.set('password', QBIT_PASSWORD)
+
+  const res = await fetch(`${QBIT_BASE}/api/v2/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  })
+
+  const txt = await res.text()
+  if (!res.ok || txt.trim() !== 'Ok.') throw new Error(`qBittorrent login failed: ${txt}`)
+
+  const cookie = res.headers.get('set-cookie')
+  if (!cookie) throw new Error('qBittorrent login missing cookie')
+
+  return cookie.split(';')[0]
+}
+
+async function qbitAddTorrent(opts: { cookie: string; url: string; savePath: string }) {
+  const form = new FormData()
+  form.set('urls', opts.url)
+  form.set('savepath', opts.savePath)
+  form.set('paused', 'false')
+  form.set('autoTMM', 'false')
+
+  const res = await fetch(`${QBIT_BASE}/api/v2/torrents/add`, {
+    method: 'POST',
+    headers: { cookie: opts.cookie },
+    body: form as any,
+  })
+
+  const txt = await res.text()
+  if (!res.ok) throw new Error(`qBittorrent add failed: ${txt}`)
+}
+
+async function qbitGetTorrents(opts: { cookie: string }) {
+  const res = await fetch(`${QBIT_BASE}/api/v2/torrents/info`, {
+    headers: { cookie: opts.cookie },
+  })
+  if (!res.ok) throw new Error(`qBittorrent torrents/info failed`)
+  return (await res.json()) as any[]
+}
+
+async function qbitGetTorrent(opts: { cookie: string; hash: string }) {
+  const res = await fetch(`${QBIT_BASE}/api/v2/torrents/info?hashes=${opts.hash}`, {
+    headers: { cookie: opts.cookie },
+  })
+  if (!res.ok) throw new Error(`qBittorrent torrent/info failed`)
+  const arr = (await res.json()) as any[]
+  return arr?.[0] || null
+}
+
+async function qbitGetFiles(opts: { cookie: string; hash: string }) {
+  const res = await fetch(`${QBIT_BASE}/api/v2/torrents/files?hash=${opts.hash}`, {
+    headers: { cookie: opts.cookie },
+  })
+  if (!res.ok) throw new Error(`qBittorrent torrents/files failed`)
+  return (await res.json()) as any[]
+}
+
+async function qbitWaitForCompletion(opts: {
+  cookie: string
+  downloadId: string
+  hash: string
+  db: any
+  redis: any
+}) {
+  let lastRedisUpdate = Date.now()
+  let lastMongoUpdate = Date.now()
+
+  while (true) {
+    const t = await qbitGetTorrent({ cookie: opts.cookie, hash: opts.hash })
+    if (!t) throw new Error('Torrent not found in qBittorrent')
+
+    const totalBytes = t.size || 0
+    const downloadedBytes = Math.floor((t.progress || 0) * totalBytes)
+    const speed = t.dlspeed || 0
+    const eta = t.eta && t.eta > 0 ? t.eta : 0
+
+    const seeders = t.num_seeds || t.num_complete || 0
+    const peers = t.num_leechs || t.num_incomplete || 0
+    const uploadSpeed = t.upspeed || 0
+
+    const now = Date.now()
+
+    if (now - lastRedisUpdate >= 1000) {
+      const progress: any = {
+        downloadId: opts.downloadId,
+        status: 'downloading',
+        totalBytes,
+        downloadedBytes,
+        speed,
+        eta,
+        updatedAt: now,
+        torrentInfo: { seeders, peers, uploadSpeed },
+      }
+
+      await opts.redis.setEx(`download:progress:${opts.downloadId}`, 300, JSON.stringify(progress))
+      lastRedisUpdate = now
+    }
+
+    if (now - lastMongoUpdate >= 5000) {
+      await opts.db.collection<Download>('downloads').updateOne(
+        { _id: new ObjectId(opts.downloadId) },
+        {
+          $set: {
+            totalBytes,
+            downloadedBytes,
+            speed,
+            eta,
+            torrentInfo: { seeders, peers, uploadSpeed },
+            updatedAt: new Date(),
+          },
+        }
+      )
+      lastMongoUpdate = now
+    }
+
+    if (t.state === 'error') throw new Error('Torrent error in qBittorrent')
+    if (t.state === 'missingFiles') throw new Error('Torrent missing files in qBittorrent')
+    if (t.state === 'stalledDL' && downloadedBytes === 0) {
+      // not always failure but a hint
+    }
+
+    if ((t.progress || 0) >= 0.999 || t.state === 'uploading' || t.state === 'stalledUP') {
+      return t
+    }
+
+    await new Promise((r) => setTimeout(r, 2000))
+  }
 }
 
 async function processDownload(job: Job<DownloadJobData>) {
@@ -328,66 +431,101 @@ async function processDownload(job: Job<DownloadJobData>) {
 
     await fs.mkdir(downloadPath, { recursive: true })
 
-    const isTorrent = isTorrentUrl(inputUrl)
+    // TORRENTS -> qBittorrent
+    if (isTorrentUrl(inputUrl)) {
+      const cookie = await qbitLogin()
+
+      // store torrents in same folder (downloadPath)
+      await qbitAddTorrent({ cookie, url: inputUrl, savePath: downloadPath })
+
+      // find torrent hash by newest entry matching save path
+      const list = await qbitGetTorrents({ cookie })
+      const match = list
+        .filter((x) => x.save_path && x.save_path.startsWith(downloadPath))
+        .sort((a, b) => (b.added_on || 0) - (a.added_on || 0))[0]
+
+      if (!match?.hash) throw new Error('Could not determine torrent hash after adding')
+
+      const hash = match.hash as string
+
+      await db.collection<Download>('downloads').updateOne(
+        { _id: new ObjectId(downloadId) },
+        { $set: { torrentHash: hash, updatedAt: new Date() } }
+      )
+
+      await qbitWaitForCompletion({ cookie, downloadId, hash, db, redis })
+
+      // choose biggest file as "main file"
+      const files = await qbitGetFiles({ cookie, hash })
+      const biggest = files.sort((a, b) => (b.size || 0) - (a.size || 0))[0]
+
+      const downloadedFile = biggest?.name
+        ? path.basename(biggest.name)
+        : filename
+
+      const finalOutputFile = path.join(downloadPath, downloadedFile)
+
+      // ensure exists
+      const stats = await fs.stat(finalOutputFile)
+      const finalSize = stats.size
+
+      if (finalSize < 1024) throw new Error('Torrent completed but file too small')
+
+      const publicUrl = `${APP_URL}/d/${path.basename(path.dirname(downloadPath))}/${downloadId}/${downloadedFile}`
+
+      await db.collection<Download>('downloads').updateOne(
+        { _id: new ObjectId(downloadId) },
+        {
+          $set: {
+            status: 'completed',
+            filename: downloadedFile,
+            totalBytes: finalSize,
+            downloadedBytes: finalSize,
+            publicUrl,
+            completedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        }
+      )
+
+      await db.collection('tokens').updateOne(
+        { _id: new ObjectId(tokenId) },
+        { $inc: { usedBytes: finalSize }, $set: { updatedAt: new Date() } }
+      )
+
+      await redis.del(`download:progress:${downloadId}`)
+      console.log(`Download ${downloadId} completed successfully`)
+      return
+    }
+
+    // DIRECT LINKS -> aria2 + playwright fallback
     const baseHeaders = getDefaultClientHeaders()
-
     let redirectedUrl: string | null = null
-    let seeders = 0
-    let peers = 0
-    let uploadSpeed = 0
 
-    if (!isTorrent) {
-      const finalUrl = await resolveFinalUrl(inputUrl)
-      if (finalUrl && finalUrl !== inputUrl) {
-        redirectedUrl = finalUrl
-        await db.collection<Download>('downloads').updateOne(
-          { _id: new ObjectId(downloadId) },
-          { $set: { redirectedUrl, updatedAt: new Date() } }
-        )
-      }
+    const finalResolved = await resolveFinalUrl(inputUrl)
+    if (finalResolved && finalResolved !== inputUrl) {
+      redirectedUrl = finalResolved
+      await db.collection<Download>('downloads').updateOne(
+        { _id: new ObjectId(downloadId) },
+        { $set: { redirectedUrl, updatedAt: new Date() } }
+      )
     }
 
     const finalUrl = redirectedUrl || inputUrl
 
-    const aria2cArgs = isTorrent
-      ? [
-          '--enable-dht=true',
-          '--bt-enable-lpd=true',
-          '--enable-peer-exchange=true',
-          '--seed-time=0',
-          '--bt-max-peers=100',
-          '--bt-request-peer-speed-limit=10M',
-          '--max-upload-limit=1K',
-          '--bt-seed-unverified=false',
-          '--bt-save-metadata=true',
-          '--bt-hash-check-seed=true',
-          '--bt-detach-seed-only=true',
-          '--listen-port=6881-6889',
-          '--dht-listen-port=6881-6889',
-          '--follow-torrent=mem',
-          '--split=16',
-          '--max-connection-per-server=16',
-          '--min-split-size=1M',
-          '--file-allocation=none',
-          '--summary-interval=1',
-          '--continue=true',
-          '--allow-overwrite=true',
-          `--dir=${downloadPath}`,
-          finalUrl,
-        ]
-      : [
-          ...baseHeaders.ariaArgs,
-          '--split=16',
-          '--max-connection-per-server=16',
-          '--min-split-size=1M',
-          '--file-allocation=none',
-          '--summary-interval=1',
-          '--continue=true',
-          '--allow-overwrite=true',
-          `--dir=${downloadPath}`,
-          `--out=${filename}`,
-          finalUrl,
-        ]
+    const aria2cArgs = [
+      ...baseHeaders.ariaArgs,
+      '--split=16',
+      '--max-connection-per-server=16',
+      '--min-split-size=1M',
+      '--file-allocation=none',
+      '--summary-interval=1',
+      '--continue=true',
+      '--allow-overwrite=true',
+      `--dir=${downloadPath}`,
+      `--out=${filename}`,
+      finalUrl,
+    ]
 
     const aria2c = spawn('aria2c', aria2cArgs)
 
@@ -423,16 +561,6 @@ async function processDownload(job: Job<DownloadJobData>) {
         )
       }
 
-      if (isTorrent) {
-        const seedersMatch = output.match(/SEEDER:(\d+)/)
-        const peersMatch = output.match(/PEER:(\d+)/)
-        const uploadMatch = output.match(/UP:([0-9.]+[KMG]?i?B)/)
-
-        if (seedersMatch) seeders = parseInt(seedersMatch[1])
-        if (peersMatch) peers = parseInt(peersMatch[1])
-        if (uploadMatch) uploadSpeed = parseSizeToBytes(uploadMatch[1])
-      }
-
       const downloadMatch = output.match(/\((\d+)%\)/)
       const speedMatch = output.match(/DL:([0-9.]+[KMG]?i?B)/)
       const sizeMatch = output.match(/SIZE:([0-9.]+[KMG]?i?B)/)
@@ -454,7 +582,6 @@ async function processDownload(job: Job<DownloadJobData>) {
 
       if (now - lastRedisUpdate >= 1000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
-
         const progress: any = {
           downloadId,
           status: 'downloading',
@@ -466,7 +593,6 @@ async function processDownload(job: Job<DownloadJobData>) {
         }
 
         if (redirectedUrl) progress.redirectedUrl = redirectedUrl
-        if (isTorrent) progress.torrentInfo = { seeders, peers, uploadSpeed }
 
         await redis.setEx(`download:progress:${downloadId}`, 300, JSON.stringify(progress))
         lastRedisUpdate = now
@@ -474,15 +600,21 @@ async function processDownload(job: Job<DownloadJobData>) {
 
       if (now - lastMongoUpdate >= 5000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
-        const updateData: any = { totalBytes, downloadedBytes, speed, eta, updatedAt: new Date() }
-
-        if (redirectedUrl) updateData.redirectedUrl = redirectedUrl
-        if (isTorrent) updateData.torrentInfo = { seeders, peers, uploadSpeed }
 
         await db.collection<Download>('downloads').updateOne(
           { _id: new ObjectId(downloadId) },
-          { $set: updateData }
+          {
+            $set: {
+              totalBytes,
+              downloadedBytes,
+              speed,
+              eta,
+              redirectedUrl,
+              updatedAt: new Date(),
+            },
+          }
         )
+
         lastMongoUpdate = now
       }
     })
@@ -498,12 +630,10 @@ async function processDownload(job: Job<DownloadJobData>) {
       }
     })
 
-    const exitCode = await new Promise<number>((resolve) => {
-      aria2c.on('close', (code) => resolve(code || 0))
-    })
+    const exitCode = await new Promise<number>((resolve) => aria2c.on('close', (code) => resolve(code || 0)))
 
-    if (!isTorrent && (shouldBrowser || exitCode !== 0)) {
-      console.log(`aria2 blocked status=${lastHttpStatus}, using playwright fallback...`)
+    if (shouldBrowser || exitCode !== 0) {
+      console.log(`aria2 failed/block status=${lastHttpStatus}, using playwright fallback...`)
 
       const { directUrl, cookies, referer } = await resolveWithBrowser(finalUrl)
 
@@ -533,15 +663,12 @@ async function processDownload(job: Job<DownloadJobData>) {
     const finalOutputFile = path.join(downloadPath, downloadedFile)
     const stats = await fs.stat(finalOutputFile)
 
-    if (stats.size < MIN_REAL_FILE_BYTES) {
-      throw new Error(
-        `Downloaded file too small (${stats.size} bytes). Probably ad/api response, not real file.`
-      )
+    if (stats.size < 1024) throw new Error('Downloaded file is too small (blocked/invalid)')
+    if (stats.size < MIN_REAL_FILE_BYTES && totalBytes > MIN_REAL_FILE_BYTES) {
+      throw new Error(`Downloaded content too small (${stats.size} bytes). Not real file.`)
     }
 
-    const publicUrl = `${APP_URL}/d/${path.basename(
-      path.dirname(downloadPath)
-    )}/${downloadId}/${downloadedFile}`
+    const publicUrl = `${APP_URL}/d/${path.basename(path.dirname(downloadPath))}/${downloadId}/${downloadedFile}`
 
     await db.collection<Download>('downloads').updateOne(
       { _id: new ObjectId(downloadId) },
@@ -568,12 +695,26 @@ async function processDownload(job: Job<DownloadJobData>) {
   } catch (error: any) {
     console.error(`Download ${downloadId} failed:`, error)
 
-    await db.collection<Download>('downloads').updateOne(
-      { _id: new ObjectId(downloadId) },
-      { $set: { status: 'failed', errorMessage: error.message, updatedAt: new Date() } }
-    )
+    const db = await getDb().catch(() => null)
+    const redis = await getRedisClient().catch(() => null)
 
-    await redis.del(`download:progress:${downloadId}`)
+    if (db) {
+      await db.collection<Download>('downloads').updateOne(
+        { _id: new ObjectId(downloadId) },
+        {
+          $set: {
+            status: 'failed',
+            errorMessage: error.message,
+            updatedAt: new Date(),
+          },
+        }
+      )
+    }
+
+    if (redis) {
+      await redis.del(`download:progress:${downloadId}`)
+    }
+
     throw error
   }
 }
