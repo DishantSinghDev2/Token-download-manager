@@ -17,6 +17,8 @@ interface TokenData {
   usedBytes: number
   expiresAt: string
   maxConcurrentDownloads: number
+  createdAt: string
+  updatedAt: string
 }
 
 interface DownloadData {
