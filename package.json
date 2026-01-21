@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "worker": "tsx src/worker/download-worker.ts",
-    "init-admin": "tsx src/scripts/init-admin.ts"
+    "init-admin": "node src/scripts/init-admin.js"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

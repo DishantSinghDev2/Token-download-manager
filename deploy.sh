@@ -125,7 +125,19 @@ echo "✓ Redis is ready"
 echo ""
 echo "Step 4: Initializing Admin User"
 echo "======================================"
-docker compose exec -T app npm run init-admin
+
+# Wait a bit more for app to be ready
+sleep 5
+
+# Run init-admin script
+docker compose exec -T app node src/scripts/init-admin.js
+
+if [ $? -ne 0 ]; then
+    echo "⚠️  Warning: Admin initialization failed"
+    echo "You can manually create admin later with:"
+    echo "  docker-compose exec app node src/scripts/init-admin.js"
+fi
+
 
 echo ""
 echo "=========================================="
