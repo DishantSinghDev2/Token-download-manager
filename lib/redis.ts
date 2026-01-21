@@ -26,7 +26,7 @@ export const getRedis = getRedisClient;
 export async function getCache<T>(key: string): Promise<T | null> {
   const client = await getRedisClient();
   const value = await client.get(key);
-  return value ? JSON.parse(value) : null;
+  return value ? JSON.parse(value || '') : null;
 }
 
 export async function setCache<T>(key: string, value: T, ttl?: number): Promise<void> {
