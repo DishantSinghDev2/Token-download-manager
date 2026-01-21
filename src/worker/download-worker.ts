@@ -48,12 +48,12 @@ async function processDownload(job: Job<DownloadJobData>) {
 
     const outputFile = path.join(downloadPath, filename)
     const isTorrent = isTorrentUrl(inputUrl)
-    
+
     let redirectedUrl: string | null = null
     let seeders = 0
     let peers = 0
     let uploadSpeed = 0
-    
+
     // Build aria2c command based on type
     const aria2cArgs = isTorrent ? [
       // Torrent-specific options
@@ -89,12 +89,12 @@ async function processDownload(job: Job<DownloadJobData>) {
       '--summary-interval=1',
       '--continue=true',
       '--allow-overwrite=true',
-      '--max-redirect=10',
+      '--max-redirection=10',
       `--dir=${downloadPath}`,
       `--out=${filename}`,
       inputUrl,
     ]
-    
+
     // Start aria2c download
     const aria2c = spawn('aria2c', aria2cArgs)
 
@@ -108,11 +108,14 @@ async function processDownload(job: Job<DownloadJobData>) {
       console.log(`aria2c stdout: ${output}`)
 
       // Detect redirects
-      const redirectMatch = output.match(/Redirecting to (.+)/)
+      const redirectMatch =
+        output.match(/Redirecting to (https?:\/\/\S+)/i) ||
+        output.match(/Location:\s*(https?:\/\/\S+)/i)
+
       if (redirectMatch) {
         redirectedUrl = redirectMatch[1].trim() || ''
         console.log(`Redirect detected: ${redirectedUrl}`)
-        
+
         // Save redirect info to MongoDB
         await db.collection<Download>('downloads').updateOne(
           { _id: new ObjectId(downloadId) },
@@ -130,7 +133,7 @@ async function processDownload(job: Job<DownloadJobData>) {
         const seedersMatch = output.match(/SEEDER:(\d+)/)
         const peersMatch = output.match(/PEER:(\d+)/)
         const uploadMatch = output.match(/UP:([0-9.]+[KMG]?i?B)/)
-        
+
         if (seedersMatch) seeders = parseInt(seedersMatch[1])
         if (peersMatch) peers = parseInt(peersMatch[1])
         if (uploadMatch) uploadSpeed = parseSizeToBytes(uploadMatch[1])
@@ -159,7 +162,7 @@ async function processDownload(job: Job<DownloadJobData>) {
       }
 
       const now = Date.now()
-      
+
       // Update Redis every second
       if (now - lastUpdate >= 1000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
