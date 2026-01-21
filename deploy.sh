@@ -62,7 +62,7 @@ else
     # Stop any service on port 80
     if lsof -Pi :80 -sTCP:LISTEN -t >/dev/null 2>&1; then
         echo "⚠️  Port 80 is in use. Stopping conflicting services..."
-        docker-compose down 2>/dev/null || true
+        docker compose down 2>/dev/null || true
     fi
     
     # Create volumes if they don't exist
@@ -97,12 +97,12 @@ fi
 echo ""
 echo "Step 2: Building Docker Images"
 echo "======================================"
-docker-compose build --no-cache
+docker compose build --no-cache
 
 echo ""
 echo "Step 3: Starting Services"
 echo "======================================"
-docker-compose up -d
+docker compose up -d
 
 echo ""
 echo "Waiting for services to start..."
@@ -110,14 +110,14 @@ sleep 15
 
 # Wait for MongoDB to be ready
 echo "Waiting for MongoDB..."
-until docker-compose exec -T mongo mongosh --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
+until docker compose exec -T mongo mongosh --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
     sleep 2
 done
 echo "✓ MongoDB is ready"
 
 # Wait for Redis to be ready
 echo "Waiting for Redis..."
-until docker-compose exec -T redis redis-cli ping > /dev/null 2>&1; do
+until docker compose exec -T redis redis-cli ping > /dev/null 2>&1; do
     sleep 2
 done
 echo "✓ Redis is ready"
@@ -125,7 +125,7 @@ echo "✓ Redis is ready"
 echo ""
 echo "Step 4: Initializing Admin User"
 echo "======================================"
-docker-compose exec -T app npm run init-admin
+docker compose exec -T app npm run init-admin
 
 echo ""
 echo "=========================================="
@@ -146,10 +146,10 @@ echo "  3. Create your first download token"
 echo "  4. Share the token link with users"
 echo ""
 echo "Useful Commands:"
-echo "  View logs:     docker-compose logs -f"
-echo "  Restart:       docker-compose restart"
-echo "  Stop:          docker-compose down"
-echo "  Update:        git pull && docker-compose up -d --build"
+echo "  View logs:     docker compose logs -f"
+echo "  Restart:       docker compose restart"
+echo "  Stop:          docker compose down"
+echo "  Update:        git pull && docker compose up -d --build"
 echo ""
 echo "⚠️  IMPORTANT: Change your admin password after first login!"
 echo "=========================================="
