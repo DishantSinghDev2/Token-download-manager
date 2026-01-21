@@ -34,7 +34,7 @@ export interface Download {
   eta: number
   errorMessage?: string
   publicUrl?: string
-  redirectedUrl?: string | null
+  redirectedUrl?: string
   torrentInfo?: {
     seeders: number
     peers: number

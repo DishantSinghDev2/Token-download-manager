@@ -110,7 +110,7 @@ async function processDownload(job: Job<DownloadJobData>) {
       // Detect redirects
       const redirectMatch = output.match(/Redirecting to (.+)/)
       if (redirectMatch) {
-        redirectedUrl = redirectMatch[1].trim()
+        redirectedUrl = redirectMatch[1].trim() || ''
         console.log(`Redirect detected: ${redirectedUrl}`)
         
         // Save redirect info to MongoDB
