@@ -1,149 +1,99 @@
+version: '3.8'
+
 services:
-  # MongoDB Database
   mongo:
     image: mongo:7
-    container_name: tdm_mongo
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_DATABASE: token_download_manager
+    restart: always
     volumes:
-      - mongo_data:/data/db
-      - mongo_config:/data/configdb
+      - mongo-data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=token-download-manager
     networks:
-      - tdm_network
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/token_download_manager --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - app-network
 
-  # Redis Cache & Queue
   redis:
     image: redis:7-alpine
-    container_name: tdm_redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - tdm_network
+    restart: always
     command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    volumes:
+      - redis-data:/data
+    networks:
+      - app-network
 
-  # Next.js Application
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: tdm_app
-    restart: unless-stopped
-    depends_on:
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    ports:
-      - "3000:3000"
+    restart: always
     environment:
-      NODE_ENV: production
-      MONGODB_URI: mongodb://mongo:27017/token_download_manager
-      MONGODB_DB: token_download_manager
-      REDIS_URL: redis://redis:6379
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-      NEXTAUTH_URL: https://faster.p.dishis.tech
-      NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL: http://localhost:3000
+      - NEXT_PUBLIC_APP_URL=https://faster.p.dishis.tech
+      - NEXTAUTH_URL=https://faster.p.dishis.tech
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - MONGODB_URI=mongodb://mongo:27017/token-download-manager
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DOWNLOADS_DIR=/downloads
+      - INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL}
+      - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD}
     volumes:
-      - /downloads:/downloads
+      - downloads:/downloads
+    depends_on:
+      - mongo
+      - redis
     networks:
-      - tdm_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      - app-network
 
-  # BullMQ Worker
   worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    container_name: tdm_worker
-    restart: unless-stopped
-    depends_on:
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    restart: always
     environment:
-      NODE_ENV: production
-      MONGODB_URI: mongodb://mongo:27017/token_download_manager
-      MONGODB_DB: token_download_manager
-      REDIS_URL: redis://redis:6379
-      WORKER_CONCURRENCY: "3"
+      - NEXT_PUBLIC_APP_URL=https://faster.p.dishis.tech
+      - MONGODB_URI=mongodb://mongo:27017/token-download-manager
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DOWNLOADS_DIR=/downloads
     volumes:
-      - /downloads:/downloads
+      - downloads:/downloads
+    depends_on:
+      - mongo
+      - redis
     networks:
-      - tdm_network
+      - app-network
 
-  # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
-    container_name: tdm_nginx
-    restart: unless-stopped
-    depends_on:
-      - app
+    restart: always
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - /downloads:/downloads:ro
-      - certbot_etc:/etc/letsencrypt:ro
-      - certbot_var:/var/lib/letsencrypt:ro
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - downloads:/downloads:ro
+      - certbot-etc:/etc/letsencrypt:ro
+      - certbot-var:/var/lib/letsencrypt:ro
+    depends_on:
+      - app
     networks:
-      - tdm_network
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - app-network
 
-  # Certbot for SSL certificates
   certbot:
     image: certbot/certbot:latest
-    container_name: tdm_certbot
-    restart: unless-stopped
     volumes:
-      - certbot_etc:/etc/letsencrypt
-      - certbot_var:/var/lib/letsencrypt
-      - ./certbot/renewal:/etc/letsencrypt/renewal-hooks/deploy:ro
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/lib/letsencrypt
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
     networks:
-      - tdm_network
-    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $!; done;'
-    environment:
-      - CERTBOT_EMAIL=${CERTBOT_EMAIL:-admin@faster.p.dishis.tech}
-      - DOMAIN=${DOMAIN:-faster.p.dishis.tech}
-
-volumes:
-  mongo_data:
-    driver: local
-  mongo_config:
-    driver: local
-  redis_data:
-    driver: local
-  certbot_etc:
-    driver: local
-  certbot_var:
-    driver: local
+      - app-network
 
 networks:
-  tdm_network:
+  app-network:
     driver: bridge
+
+volumes:
+  mongo-data:
+  redis-data:
+  downloads:
+  certbot-etc:
+  certbot-var:

@@ -1,247 +1,329 @@
 # Token Download Manager
 
-A production-grade, enterprise-ready download management system that leverages full VM bandwidth with multi-connection downloads, token-based access control, and comprehensive admin dashboard.
+Production-ready high-speed download manager with token-based access control, built with Next.js 14, MongoDB, Redis, and BullMQ.
 
 ## Features
 
-### User Features
-- **Token-based Access**: Secure URLs with password protection
-- **Multi-Connection Downloads**: Download with 16 simultaneous connections for maximum speed
-- **Real-Time Progress**: Live speed, ETA, and progress tracking via Redis
-- **Download History**: Track all downloads and their status
-- **Quota Management**: Per-token download quotas and file size limits
-
-### Admin Features
-- **Token Management**: Create, revoke, pause tokens with flexible quotas
-- **Download Monitoring**: Real-time view of all active downloads
-- **System Metrics**: Live CPU, RAM, disk, and network usage
-- **Security Monitoring**: IP tracking, suspicious activity alerts, IP blocking
-- **Admin User Management**: Create and manage admin accounts
-- **Audit Logs**: Complete activity logging for compliance
-
-### Infrastructure
-- **Docker Compose**: Complete containerized deployment
-- **Nginx**: Reverse proxy with SSL/TLS, range requests for multi-connection downloads
-- **Certbot**: Automatic Let's Encrypt certificate management
-- **MongoDB**: Persistent data storage with full schema
-- **Redis**: Fast caching, rate limiting, and job queues
-- **BullMQ**: Distributed job processing for downloads
-- **aria2c**: High-performance multi-connection download engine
+- 🔐 **Secure Token-Based Access**: Admin creates tokens with custom limits
+- 🚀 **High-Speed Downloads**: Multi-connection downloads using aria2c (16 connections)
+- 📊 **Real-Time Progress**: Live download progress tracking via Redis
+- 💾 **Persistent Storage**: MongoDB for data, Redis for caching and job queue
+- 🔄 **Background Processing**: BullMQ worker for concurrent downloads
+- 📦 **Direct File Serving**: Nginx serves downloaded files with Range request support
+- 🔒 **SSL/TLS**: Automated Let's Encrypt SSL certificate management
 
 ## Tech Stack
 
-- **Frontend**: Next.js 16+, React 19, TypeScript, TailwindCSS, shadcn/ui
-- **Backend**: Next.js App Router, Server Actions, API Routes
+- **Frontend**: Next.js 14 (App Router), TypeScript, Tailwind CSS, shadcn/ui
+- **Backend**: Next.js API Routes, NextAuth.js
 - **Database**: MongoDB
 - **Cache/Queue**: Redis, BullMQ
-- **Authentication**: NextAuth.js with credentials provider
-- **Download Engine**: aria2c with segmented connections
-- **Deployment**: Docker, Docker Compose, Nginx, Certbot
+- **Download Engine**: aria2c
+- **Web Server**: Nginx
+- **Containerization**: Docker, Docker Compose
 
-## Project Structure
+## Prerequisites
 
-```
-├── app/
-│   ├── admin/                    # Admin dashboard routes
-│   │   ├── dashboard/
-│   │   ├── tokens/
-│   │   ├── downloads/
-│   │   ├── users/
-│   │   ├── security/
-│   │   └── login/
-│   ├── api/                      # API routes
-│   │   ├── token/                # Token portal APIs
-│   │   └── admin/                # Admin APIs
-│   ├── t/[token]/               # Token portal page
-│   ├── layout.tsx               # Root layout
-│   ├── page.tsx                 # Home page
-│   └── globals.css              # Styling
-├── components/
-│   ├── admin/                   # Admin dashboard components
-│   ├── token-portal/            # Token portal components
-│   ├── ui/                      # shadcn/ui components
-│   └── session-provider.tsx     # NextAuth provider
-├── lib/
-│   ├── db.ts                    # MongoDB connection
-│   ├── redis.ts                 # Redis utilities
-│   ├── queue.ts                 # BullMQ queue setup
-│   ├── auth.ts                  # Authentication utilities
-│   ├── auth-config.ts           # NextAuth configuration
-│   ├── models.ts                # TypeScript data models
-│   ├── download-executor.ts     # Download processing
-│   ├── worker.ts                # Worker process
-│   └── system-metrics.ts        # System monitoring
-├── scripts/
-│   ├── init-mongodb.ts          # MongoDB initialization
-│   └── init-admin.ts            # Admin user setup
-├── nginx/
-│   └── nginx.conf               # Nginx configuration
-├── Dockerfile                   # Main app container
-├── Dockerfile.worker            # Worker container
-├── docker-compose.yml           # Docker Compose setup
-├── DEPLOYMENT.md                # Deployment guide
-└── proxy.ts                     # Next.js middleware (auth)
-```
+- Docker and Docker Compose
+- Domain name pointed to your server (faster.p.dishis.tech)
+- Ports 80 and 443 open
 
 ## Quick Start
 
-### Local Development
+### 1. Clone and Setup
 
 ```bash
-# Install dependencies
-npm install
-
-# Set up environment
+git clone <repository-url>
+cd token-download-manager
 cp .env.example .env
-nano .env  # Update with your configuration
-
-# Run development server
-npm run dev
-
-# Initialize database (in another terminal)
-npm run init-db
-npm run init-admin
 ```
 
-Visit `http://localhost:3000`
+### 2. Configure Environment
 
-### Docker Deployment
+Edit `.env` file:
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for complete deployment instructions.
+```env
+NEXT_PUBLIC_APP_URL=https://faster.p.dishis.tech
+NEXTAUTH_URL=https://faster.p.dishis.tech
+NEXTAUTH_SECRET=your-secure-random-string-min-32-chars
+
+MONGODB_URI=mongodb://mongo:27017/token-download-manager
+
+REDIS_HOST=redis
+REDIS_PORT=6379
+
+INITIAL_ADMIN_EMAIL=admin@example.com
+INITIAL_ADMIN_PASSWORD=SecurePassword123!
+
+DOWNLOADS_DIR=/downloads
+```
+
+### 3. Get SSL Certificate
+
+First, ensure your domain points to your server, then get the SSL certificate:
 
 ```bash
-# Quick start
-cp .env.example .env
-nano .env  # Update environment variables
+# Create docker network and volumes
+docker network create app-network
+docker volume create certbot-etc
+docker volume create certbot-var
 
-# Build and start
+# Run certbot in standalone mode
+docker run -it --rm \
+  -p 80:80 \
+  -v certbot-etc:/etc/letsencrypt \
+  -v certbot-var:/var/lib/letsencrypt \
+  certbot/certbot certonly \
+  --standalone \
+  --email admin@faster.p.dishis.tech \
+  --agree-tos \
+  --no-eff-email \
+  -d faster.p.dishis.tech
+```
+
+### 4. Build and Start Services
+
+```bash
+# Build images
+docker-compose build
+
+# Start all services
 docker-compose up -d
 
-# Initialize database
-docker exec tdm_app npm run init-db
-docker exec tdm_app npm run init-admin
+# Check logs
+docker-compose logs -f
+
+# Wait for services to be ready (about 30 seconds)
 ```
+
+### 5. Initialize Admin User
+
+```bash
+docker-compose exec app npm run init-admin
+```
+
+### 6. Access the Application
+
+Open your browser and navigate to:
+```
+https://faster.p.dishis.tech
+```
+
+Login with your admin credentials from the `.env` file.
+
+## Usage
+
+### Admin Workflow
+
+1. **Login**: Navigate to `/admin/login`
+2. **Create Token**: 
+   - Go to "Tokens" page
+   - Click "Create Token"
+   - Set password, quotas, and limits
+   - Copy the token link
+3. **Share Token**: Give users the token link with password
+
+Token link format:
+```
+https://faster.p.ishis.tech/t/<TOKEN>?p=<PASSWORD>
+```
+
+### User Workflow
+
+1. **Access Token Portal**: Open the token link (with password in URL)
+2. **Submit Download URL**: Enter a direct download URL
+3. **Monitor Progress**: Watch real-time download progress
+4. **Download File**: Once complete, click "Download File" button
+
+## Architecture
+
+### Services
+
+- **app**: Next.js application (UI + API)
+- **worker**: BullMQ worker for download processing
+- **nginx**: Reverse proxy and file server
+- **mongo**: MongoDB database
+- **redis**: Redis cache and job queue
+- **certbot**: SSL certificate management
+
+### Download Flow
+
+1. User submits URL via token portal
+2. API validates token, URL, and quotas
+3. Download job enqueued in BullMQ
+4. Worker picks up job and starts aria2c
+5. Progress updated to Redis (1s) and MongoDB (5s)
+6. On completion, file accessible via Nginx
+7. Token quota updated
+
+### File Structure
+
+```
+/downloads/
+  /<token>/
+    /<downloadId>/
+      <filename>
+```
+
+Public URL: `https://faster.p.dishis.tech/d/<token>/<downloadId>/<filename>`
 
 ## API Endpoints
 
-### Token Portal
-- `POST /api/token/validate` - Validate token and password
-- `POST /api/token/submit-download` - Submit download URL
-- `GET /api/token/downloads` - Get token's downloads
+### Admin APIs (Protected)
 
-### Admin Dashboard
-- `GET /api/admin/metrics` - System metrics
-- `GET /api/admin/activities` - Recent activity log
+- `POST /api/admin/tokens` - Create new token
+- `PATCH /api/admin/tokens/:id` - Update token status
 
-### Downloads
-- `GET /d/<tokenId>/<downloadId>/<filename>` - Download file
+### Public APIs
 
-## Data Models
-
-### Token
-- token (unique, secure random)
-- passwordHash (bcrypt)
-- maxFileSize, totalQuota
-- expiryDate, status
-- allowedIps, allowedDevices (optional)
-
-### Download
-- tokenId, inputUrl, originalFilename
-- fileSize, downloadedBytes, status
-- ip, userAgent, deviceId
-- publicDownloadUrl, outputFilePath
-- createdAt, updatedAt, completedAt
-
-### Admin
-- email (unique), passwordHash
-- role (superadmin/admin)
-- lastLogin, createdAt, disabled
-
-## Security
-
-- Bcrypt password hashing (all passwords)
-- Token-based access control
-- Rate limiting (5 login/min, 10 downloads/min per IP)
-- SSRF prevention (URL validation)
-- IP blocking capability
-- Suspicious activity detection
-- Audit logging
-- TLS/SSL encryption
-- HTTPS only for production
+- `POST /api/downloads` - Start new download
+- `GET /api/downloads?token=<TOKEN>` - Get downloads for token
 
 ## Monitoring
 
-### System Metrics
-- CPU, RAM, Disk usage
-- Network I/O
+Access admin dashboard at `/admin/dashboard` to view:
 - Active downloads count
-- Redis/MongoDB health
+- Total downloads count
+- Redis connection health
+- MongoDB connection health
 
-### Activity Tracking
-- Download attempts and completion
-- Admin actions
-- Failed authentication attempts
-- Suspicious activity patterns
+## Maintenance
 
-## Scaling Considerations
+### View Logs
 
-- Horizontal scaling: Add multiple worker containers
-- Database: MongoDB sharding for large datasets
-- Cache: Redis persistence and clustering
-- Storage: NFS or S3 for /downloads volume
-- Load balancing: Multiple Nginx instances
+```bash
+# All services
+docker-compose logs -f
 
-## Development Notes
+# Specific service
+docker-compose logs -f app
+docker-compose logs -f worker
+docker-compose logs -f nginx
+```
 
-### Adding a New Admin Page
+### Restart Services
 
-1. Create route in `/app/admin/<feature>/page.tsx`
-2. Create component in `/components/admin/<feature>-management.tsx`
-3. Create API route in `/app/api/admin/<feature>/route.ts`
-4. Add navigation link in `/components/admin/admin-layout.tsx`
+```bash
+# Restart all
+docker-compose restart
 
-### Database Migrations
+# Restart specific service
+docker-compose restart worker
+```
 
-Database schema is initialized via `/scripts/init-mongodb.ts`. For schema changes:
+### Backup Database
 
-1. Update models in `/lib/models.ts`
-2. Update `/scripts/init-mongodb.ts` with new indexes
-3. Run: `docker exec tdm_app npm run init-db`
+```bash
+# Backup MongoDB
+docker-compose exec mongo mongodump --out /tmp/backup
+docker cp $(docker-compose ps -q mongo):/tmp/backup ./backup
 
-### Adding New Features
+# Backup downloads
+docker run --rm -v token-download-manager_downloads:/data \
+  -v $(pwd):/backup alpine \
+  tar czf /backup/downloads-backup.tar.gz /data
+```
 
-- Use Server Components when possible
-- Fetch data from database/cache, not in useEffect
-- Implement proper error handling
-- Add rate limiting where needed
-- Log actions for audit trail
+### Update Application
 
-## Production Checklist
+```bash
+# Pull latest changes
+git pull
 
-- [ ] Update all `.env` variables
-- [ ] Generate strong `NEXTAUTH_SECRET`
-- [ ] Configure domain and SSL
-- [ ] Set admin credentials
-- [ ] Review security settings in admin panel
-- [ ] Test token creation and download flow
-- [ ] Monitor system metrics
-- [ ] Set up backups for MongoDB and downloads
-- [ ] Configure firewall rules
-- [ ] Test disaster recovery
+# Rebuild and restart
+docker-compose build
+docker-compose up -d
+```
+
+## Security Features
+
+- ✅ Password hashing with bcrypt
+- ✅ SSRF protection (blocks private IPs)
+- ✅ Token-based access control
+- ✅ Rate limiting on downloads
+- ✅ Quota enforcement
+- ✅ SSL/TLS encryption
+- ✅ Secure session management
+
+## Performance
+
+- **Download Speed**: Full VM bandwidth with 16 concurrent connections
+- **Concurrent Downloads**: Configurable per token
+- **Worker Concurrency**: 3 simultaneous downloads processing
+- **Progress Updates**: Real-time via Redis
+- **File Serving**: Optimized Nginx with sendfile and Range requests
 
 ## Troubleshooting
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) troubleshooting section for common issues.
+### SSL Certificate Issues
 
-## Support
+```bash
+# Check certificate
+docker run --rm -v certbot-etc:/etc/letsencrypt certbot/certbot certificates
 
-For production deployments, ensure:
-- All services are running (check `docker-compose ps`)
-- Database and Redis are healthy
-- SSL certificates are valid
-- Disk space is sufficient
-- Monitor logs regularly
+# Renew manually
+docker-compose exec certbot certbot renew
+docker-compose restart nginx
+```
+
+### MongoDB Connection Issues
+
+```bash
+# Check MongoDB
+docker-compose exec mongo mongosh --eval "db.adminCommand('ping')"
+```
+
+### Redis Connection Issues
+
+```bash
+# Check Redis
+docker-compose exec redis redis-cli ping
+```
+
+### Worker Not Processing
+
+```bash
+# Check worker logs
+docker-compose logs -f worker
+
+# Restart worker
+docker-compose restart worker
+```
+
+### Downloads Stuck
+
+```bash
+# Check BullMQ jobs
+docker-compose exec redis redis-cli KEYS "bull:downloads:*"
+
+# Clear failed jobs
+docker-compose exec app node -e "
+const { Queue } = require('bullmq');
+const queue = new Queue('downloads', {
+  connection: { host: 'redis', port: 6379 }
+});
+queue.obliterate({ force: true });
+"
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NEXT_PUBLIC_APP_URL` | Public application URL | - |
+| `NEXTAUTH_URL` | NextAuth base URL | - |
+| `NEXTAUTH_SECRET` | NextAuth secret (32+ chars) | - |
+| `MONGODB_URI` | MongoDB connection string | - |
+| `REDIS_HOST` | Redis hostname | redis |
+| `REDIS_PORT` | Redis port | 6379 |
+| `INITIAL_ADMIN_EMAIL` | Initial admin email | - |
+| `INITIAL_ADMIN_PASSWORD` | Initial admin password | - |
+| `DOWNLOADS_DIR` | Download storage directory | /downloads |
 
 ## License
 
-This project is proprietary and confidential.
+MIT
+
+## Support
+
+For issues and questions, please open an issue on GitHub.

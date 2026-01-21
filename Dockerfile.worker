@@ -1,16 +1,15 @@
-FROM node:20-bookworm-slim
+FROM node:20-alpine
+
+# Install aria2c
+RUN apk add --no-cache aria2
 
 WORKDIR /app
-ENV NODE_ENV=production
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  aria2 curl \
-  && rm -rf /var/lib/apt/lists/*
-
-COPY package*.json ./
-RUN npm ci --include=dev
+COPY package.json package-lock.json* ./
+RUN npm ci
 
 COPY . .
-RUN npm run build:scripts
+
+RUN npm run build
 
 CMD ["npm", "run", "worker"]
