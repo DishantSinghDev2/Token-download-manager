@@ -18,6 +18,7 @@ const connection = {
 }
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://faster.p.dishis.tech'
+const MIN_REAL_FILE_BYTES = parseInt(process.env.MIN_REAL_FILE_BYTES || `${5 * 1024 * 1024}`) // 5MB
 
 function isTorrentUrl(url: string): boolean {
   return url.startsWith('magnet:') || url.endsWith('.torrent')
@@ -57,10 +58,7 @@ function getDefaultClientHeaders(referer?: string) {
     process.env.DOWNLOAD_UA ||
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
-  const ref =
-    referer ||
-    process.env.DOWNLOAD_REFERER ||
-    'https://www.google.com/'
+  const ref = referer || process.env.DOWNLOAD_REFERER || 'https://www.google.com/'
 
   return {
     ua,
@@ -71,7 +69,6 @@ function getDefaultClientHeaders(referer?: string) {
       '--header=Accept: */*',
       '--header=Connection: keep-alive',
     ],
-    curlArgs: ['-L', '-A', ua, '-e', ref],
   }
 }
 
@@ -80,38 +77,94 @@ function shouldBrowserFallback(status: number | null) {
   return [498, 429, 403, 401, 400, 451].includes(status)
 }
 
-async function resolveWithBrowser(url: string): Promise<{ directUrl: string; cookies?: string }> {
+function isProbablyRealFileResponse(headers: Record<string, string>, status: number) {
+  const ct = (headers['content-type'] || '').toLowerCase()
+  const cd = (headers['content-disposition'] || '').toLowerCase()
+  const clRaw = headers['content-length'] || ''
+  const cl = clRaw ? parseInt(clRaw) : 0
+
+  if (![200, 206].includes(status)) return false
+
+  if (cd.includes('attachment')) return true
+
+  // content-length big? almost always file
+  if (cl && cl >= MIN_REAL_FILE_BYTES) return true
+
+  // sometimes content-length missing but content-type indicates file
+  if (
+    ct.includes('application/octet-stream') ||
+    ct.includes('application/zip') ||
+    ct.includes('application/x-rar') ||
+    ct.includes('video/') ||
+    ct.includes('audio/')
+  ) {
+    return true
+  }
+
+  return false
+}
+
+function isBadUrl(u: string) {
+  const x = u.toLowerCase()
+  return (
+    x.includes('xadsmart') ||
+    x.includes('doubleclick') ||
+    x.includes('googlesyndication') ||
+    x.includes('adsystem') ||
+    x.includes('popads') ||
+    x.includes('/ads') ||
+    x.includes('analytics')
+  )
+}
+
+async function resolveWithBrowser(
+  url: string
+): Promise<{ directUrl: string; cookies?: string; referer?: string }> {
   const { chromium } = await import('playwright')
 
-  const browser = await chromium.launch({ headless: true })
-  const context = await browser.newContext()
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  })
+
+  const context = await browser.newContext({
+    userAgent: getDefaultClientHeaders().ua,
+  })
+
   const page = await context.newPage()
 
-  let directUrl: string | null = null
+  // block obvious ad/tracker calls
+  await page.route('**/*', async (route) => {
+    const reqUrl = route.request().url()
+    if (isBadUrl(reqUrl)) return route.abort()
+    return route.continue()
+  })
 
-  page.on('response', (res) => {
+  let directUrl: string | null = null
+  let directReferer: string | undefined
+
+  // 1) sniff real file responses
+  page.on('response', async (res) => {
     try {
       const u = res.url()
       if (!u.startsWith('http')) return
+      if (isBadUrl(u)) return
 
       const status = res.status()
-      const ct = (res.headers()['content-type'] || '').toLowerCase()
+      const headers = res.headers()
 
-      const maybeFile =
-        (status === 200 || status === 206) &&
-        !ct.includes('text/html') &&
-        !ct.includes('application/xhtml') &&
-        !ct.includes('text/plain')
-
-      if (maybeFile) directUrl = u
+      if (isProbablyRealFileResponse(headers, status)) {
+        directUrl = u
+        directReferer = page.url()
+      }
     } catch {}
   })
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+  await page.waitForTimeout(5000)
 
-  await page.waitForTimeout(7000)
-
-  const clickables = [
+  // 2) try triggering actual file download using download event
+  const tryClicks = [
     'a[download]',
     'a[href*="download"]',
     'button:has-text("Download")',
@@ -120,55 +173,77 @@ async function resolveWithBrowser(url: string): Promise<{ directUrl: string; coo
     'a:has-text("Free Download")',
   ]
 
-  for (const sel of clickables) {
+  for (const sel of tryClicks) {
     if (directUrl) break
     try {
       const el = await page.$(sel)
-      if (el) {
-        await el.click({ timeout: 3000 })
-        await page.waitForTimeout(6000)
+      if (!el) continue
+
+      const dl = await Promise.race([
+        page.waitForEvent('download', { timeout: 12_000 }).catch(() => null),
+        (async () => {
+          await el.click({ timeout: 3000 })
+          return null
+        })(),
+      ])
+
+      if (dl) {
+        const u = dl.url()
+        if (u && !isBadUrl(u)) {
+          directUrl = u
+          directReferer = page.url()
+          break
+        }
       }
+
+      await page.waitForTimeout(5000)
     } catch {}
   }
 
+  // 3) last try: find best looking link on page
   if (!directUrl) {
     try {
       const hrefs = await page.$$eval('a[href]', (as) =>
         as.map((a) => a.getAttribute('href') || '')
       )
 
-      const guess = hrefs.find((h) => {
-        const x = h.toLowerCase()
-        return (
-          x.includes('download') ||
-          x.includes('.zip') ||
-          x.includes('.rar') ||
-          x.includes('.7z') ||
-          x.includes('.mp4') ||
-          x.includes('.mkv') ||
-          x.includes('.exe') ||
-          x.includes('.dmg')
-        )
-      })
+      const guess = hrefs
+        .map((h) => h.trim())
+        .filter(Boolean)
+        .map((h) => {
+          try {
+            return new URL(h, url).toString()
+          } catch {
+            return ''
+          }
+        })
+        .find((h) => {
+          const x = h.toLowerCase()
+          if (!x.startsWith('http')) return false
+          if (isBadUrl(x)) return false
+          return x.includes('download') || x.includes('.zip') || x.includes('.mp4') || x.includes('.mkv')
+        })
 
-      if (guess) directUrl = new URL(guess, url).toString()
+      if (guess) {
+        directUrl = guess
+        directReferer = page.url()
+      }
     } catch {}
   }
 
-  const cookies = await context.cookies()
+  const cookiesArr = await context.cookies()
   await browser.close()
 
   if (!directUrl) {
-    throw new Error('Browser fallback could not resolve real download url (JS locked)')
+    throw new Error('Browser fallback could not resolve direct file URL (blocked/JS locked)')
   }
 
-  // sometimes directUrl requires cookies to work
   const cookieHeader =
-    cookies.length > 0
-      ? cookies.map((c) => `${c.name}=${c.value}`).join('; ')
+    cookiesArr.length > 0
+      ? cookiesArr.map((c) => `${c.name}=${c.value}`).join('; ')
       : undefined
 
-  return { directUrl, cookies: cookieHeader }
+  return { directUrl, cookies: cookieHeader, referer: directReferer }
 }
 
 async function aria2Download(opts: {
@@ -220,7 +295,7 @@ async function processDownload(job: Job<DownloadJobData>) {
     await fs.mkdir(downloadPath, { recursive: true })
 
     const isTorrent = isTorrentUrl(inputUrl)
-    const headers = getDefaultClientHeaders()
+    const baseHeaders = getDefaultClientHeaders()
 
     let redirectedUrl: string | null = null
     let seeders = 0
@@ -239,7 +314,6 @@ async function processDownload(job: Job<DownloadJobData>) {
     }
 
     const finalUrl = redirectedUrl || inputUrl
-    const outputFile = path.join(downloadPath, filename)
 
     const aria2cArgs = isTorrent
       ? [
@@ -268,7 +342,7 @@ async function processDownload(job: Job<DownloadJobData>) {
           finalUrl,
         ]
       : [
-          ...headers.ariaArgs,
+          ...baseHeaders.ariaArgs,
           '--split=16',
           '--max-connection-per-server=16',
           '--min-split-size=1M',
@@ -333,9 +407,7 @@ async function processDownload(job: Job<DownloadJobData>) {
       if (completedMatch) {
         downloadedBytes = parseSizeToBytes(completedMatch[1])
         totalBytes = parseSizeToBytes(completedMatch[2])
-      } else if (sizeMatch) {
-        totalBytes = parseSizeToBytes(sizeMatch[1])
-      }
+      } else if (sizeMatch) totalBytes = parseSizeToBytes(sizeMatch[1])
 
       if (downloadMatch && totalBytes > 0) {
         const percentage = parseInt(downloadMatch[1])
@@ -368,14 +440,7 @@ async function processDownload(job: Job<DownloadJobData>) {
 
       if (now - lastMongoUpdate >= 5000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
-
-        const updateData: any = {
-          totalBytes,
-          downloadedBytes,
-          speed,
-          eta,
-          updatedAt: new Date(),
-        }
+        const updateData: any = { totalBytes, downloadedBytes, speed, eta, updatedAt: new Date() }
 
         if (redirectedUrl) updateData.redirectedUrl = redirectedUrl
         if (isTorrent) updateData.torrentInfo = { seeders, peers, uploadSpeed }
@@ -403,24 +468,18 @@ async function processDownload(job: Job<DownloadJobData>) {
       aria2c.on('close', (code) => resolve(code || 0))
     })
 
-    // ✅ NEW: skip curl, use browser directly
     if (!isTorrent && (shouldBrowser || exitCode !== 0)) {
-      console.log(`aria2 failed/block status=${lastHttpStatus}, using playwright fallback...`)
+      console.log(`aria2 blocked status=${lastHttpStatus}, using playwright fallback...`)
 
-      const { directUrl, cookies } = await resolveWithBrowser(finalUrl)
+      const { directUrl, cookies, referer } = await resolveWithBrowser(finalUrl)
 
       await db.collection<Download>('downloads').updateOne(
         { _id: new ObjectId(downloadId) },
-        {
-          $set: {
-            redirectedUrl: directUrl,
-            updatedAt: new Date(),
-          },
-        }
+        { $set: { redirectedUrl: directUrl, updatedAt: new Date() } }
       )
 
       const headerArgs = [
-        ...headers.ariaArgs,
+        ...getDefaultClientHeaders(referer).ariaArgs,
         ...(cookies ? [`--header=Cookie: ${cookies}`] : []),
       ]
 
@@ -434,18 +493,16 @@ async function processDownload(job: Job<DownloadJobData>) {
       throw new Error(`aria2c exited with code ${exitCode}`)
     }
 
-    // locate file
     const files = await fs.readdir(downloadPath)
-    const downloadedFile =
-      files.find((f) => !f.endsWith('.aria2') && f !== '.aria2') || filename
+    const downloadedFile = files.find((f) => !f.endsWith('.aria2') && f !== '.aria2') || filename
 
     const finalOutputFile = path.join(downloadPath, downloadedFile)
-
     const stats = await fs.stat(finalOutputFile)
-    const finalSize = stats.size
 
-    if (finalSize <= 0) {
-      throw new Error('Downloaded file is 0B (blocked / invalid download).')
+    if (stats.size < MIN_REAL_FILE_BYTES) {
+      throw new Error(
+        `Downloaded file too small (${stats.size} bytes). Probably ad/api response, not real file.`
+      )
     }
 
     const publicUrl = `${APP_URL}/d/${path.basename(
@@ -458,8 +515,8 @@ async function processDownload(job: Job<DownloadJobData>) {
         $set: {
           status: 'completed',
           filename: downloadedFile,
-          totalBytes: finalSize,
-          downloadedBytes: finalSize,
+          totalBytes: stats.size,
+          downloadedBytes: stats.size,
           publicUrl,
           completedAt: new Date(),
           updatedAt: new Date(),
@@ -469,24 +526,17 @@ async function processDownload(job: Job<DownloadJobData>) {
 
     await db.collection('tokens').updateOne(
       { _id: new ObjectId(tokenId) },
-      { $inc: { usedBytes: finalSize }, $set: { updatedAt: new Date() } }
+      { $inc: { usedBytes: stats.size }, $set: { updatedAt: new Date() } }
     )
 
     await redis.del(`download:progress:${downloadId}`)
-
     console.log(`Download ${downloadId} completed successfully`)
   } catch (error: any) {
     console.error(`Download ${downloadId} failed:`, error)
 
     await db.collection<Download>('downloads').updateOne(
       { _id: new ObjectId(downloadId) },
-      {
-        $set: {
-          status: 'failed',
-          errorMessage: error.message,
-          updatedAt: new Date(),
-        },
-      }
+      { $set: { status: 'failed', errorMessage: error.message, updatedAt: new Date() } }
     )
 
     await redis.del(`download:progress:${downloadId}`)
