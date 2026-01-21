@@ -52,12 +52,59 @@ async function resolveFinalUrl(url: string): Promise<string> {
   }
 }
 
-function getDefaultBrowserHeaders(referer?: string) {
+function looksLikeHtml(data: string) {
+  const s = data.trim().toLowerCase()
+  if (!s) return false
+
+  // common "you got blocked" HTML pages
+  return (
+    s.startsWith('<!doctype html') ||
+    s.startsWith('<html') ||
+    s.includes('<script') ||
+    s.includes('window.location') ||
+    s.includes('document.location') ||
+    s.includes('<meta') ||
+    s.includes('</html>')
+  )
+}
+
+function extractRedirectUrlFromHtml(html: string): string | null {
+  const m1 = html.match(/window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i)
+  if (m1?.[1]) return m1[1]
+
+  const m2 = html.match(/location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i)
+  if (m2?.[1]) return m2[1]
+
+  const m3 = html.match(
+    /<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^;]+;\s*url=([^"'>\s]+)["']?/i
+  )
+  if (m3?.[1]) return m3[1]
+
+  const m4 = html.match(/<a[^>]+href=['"]([^'"]+)['"][^>]*>\s*click/i)
+  if (m4?.[1]) return m4[1]
+
+  return null
+}
+
+async function readFirstBytes(file: string, max = 5000) {
+  try {
+    const buf = await fs.readFile(file)
+    return buf.slice(0, max).toString('utf8')
+  } catch {
+    return ''
+  }
+}
+
+function getDefaultClientHeaders(referer?: string) {
   const ua =
     process.env.DOWNLOAD_UA ||
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
-  const ref = referer || process.env.DOWNLOAD_REFERER || 'https://mxcontent.net/'
+  // never domain-hardcode here. keep it generic.
+  const ref =
+    referer ||
+    process.env.DOWNLOAD_REFERER ||
+    'https://www.google.com/' // harmless default
 
   return {
     ua,
@@ -68,39 +115,75 @@ function getDefaultBrowserHeaders(referer?: string) {
       '--header=Accept: */*',
       '--header=Connection: keep-alive',
     ],
-    curlArgs: ['-A', ua, '-e', ref, '-L'],
+    curlArgs: ['-L', '-A', ua, '-e', ref],
   }
 }
 
-async function runCurlDownload(opts: {
+async function execCmd(cmd: string, args: string[]) {
+  const p = spawn(cmd, args)
+
+  let out = ''
+  let err = ''
+
+  p.stdout.on('data', (d) => (out += d.toString()))
+  p.stderr.on('data', (d) => (err += d.toString()))
+
+  const code = await new Promise<number>((resolve) => {
+    p.on('close', (c) => resolve(c ?? 0))
+  })
+
+  return { code, out, err }
+}
+
+async function runCurlSmartDownload(opts: {
   url: string
   outputFile: string
   downloadPath: string
-  headers: ReturnType<typeof getDefaultBrowserHeaders>
+  headers: ReturnType<typeof getDefaultClientHeaders>
+  maxRedirectSteps?: number
 }) {
   await fs.mkdir(opts.downloadPath, { recursive: true })
 
-  const args = [
-    ...opts.headers.curlArgs,
-    '-o',
-    opts.outputFile,
-    opts.url,
-  ]
+  let currentUrl = opts.url
+  const maxSteps = opts.maxRedirectSteps ?? 3
 
-  const curl = spawn('curl', args)
+  for (let step = 0; step < maxSteps; step++) {
+    const args = [...opts.headers.curlArgs, '-o', opts.outputFile, currentUrl]
+    const res = await execCmd('curl', args)
 
-  let errBuf = ''
-  curl.stderr.on('data', (d) => {
-    errBuf += d.toString()
-  })
+    if (res.code !== 0) {
+      throw new Error(`curl failed (code ${res.code}): ${res.err.slice(0, 500)}`)
+    }
 
-  const exitCode = await new Promise<number>((resolve) => {
-    curl.on('close', (code) => resolve(code || 0))
-  })
+    const head = await readFirstBytes(opts.outputFile, 8000)
+    if (!head) return
 
-  if (exitCode !== 0) {
-    throw new Error(`curl failed (code ${exitCode}): ${errBuf.slice(0, 500)}`)
+    if (!looksLikeHtml(head)) return
+
+    const redirect = extractRedirectUrlFromHtml(head)
+    if (!redirect) {
+      throw new Error(
+        `curl downloaded HTML instead of file (no redirect found). Possibly blocked.\nhead=${head.slice(
+          0,
+          400
+        )}`
+      )
+    }
+
+    // support relative redirects
+    try {
+      currentUrl = new URL(redirect, currentUrl).toString()
+    } catch {
+      currentUrl = redirect
+    }
   }
+
+  throw new Error('Too many HTML redirect hops while using curl fallback')
+}
+
+function shouldFallbackOnHttpStatus(status: number | null) {
+  if (!status) return false
+  return [498, 429, 403, 401, 400, 451].includes(status)
 }
 
 async function processDownload(job: Job<DownloadJobData>) {
@@ -124,6 +207,7 @@ async function processDownload(job: Job<DownloadJobData>) {
 
     await fs.mkdir(downloadPath, { recursive: true })
 
+    const outputFile = path.join(downloadPath, filename)
     const isTorrent = isTorrentUrl(inputUrl)
 
     let redirectedUrl: string | null = null
@@ -131,7 +215,7 @@ async function processDownload(job: Job<DownloadJobData>) {
     let peers = 0
     let uploadSpeed = 0
 
-    // Resolve final url for protected redirects (HTTP only)
+    // resolve HTTP redirects early (no harm)
     if (!isTorrent) {
       const finalUrl = await resolveFinalUrl(inputUrl)
       if (finalUrl && finalUrl !== inputUrl) {
@@ -140,23 +224,15 @@ async function processDownload(job: Job<DownloadJobData>) {
         await db.collection<Download>('downloads').updateOne(
           { _id: new ObjectId(downloadId) },
           {
-            $set: {
-              redirectedUrl,
-              updatedAt: new Date(),
-            },
+            $set: { redirectedUrl, updatedAt: new Date() },
           }
         )
       }
     }
 
     const finalUrl = redirectedUrl || inputUrl
+    const headers = getDefaultClientHeaders()
 
-    const outputFile = path.join(downloadPath, filename)
-
-    // browser-like headers for protected cdn
-    const headers = getDefaultBrowserHeaders()
-
-    // Build aria2c command based on type
     const aria2cArgs = isTorrent
       ? [
           '--enable-dht=true',
@@ -213,7 +289,7 @@ async function processDownload(job: Job<DownloadJobData>) {
       const output = data.toString()
       console.log(`aria2c stdout: ${output}`)
 
-      // Redirect detection
+      // redirect detection from aria output
       const redirectMatch =
         output.match(/Redirecting to (https?:\/\/\S+)/i) ||
         output.match(/Location:\s*(https?:\/\/\S+)/i)
@@ -223,25 +299,20 @@ async function processDownload(job: Job<DownloadJobData>) {
 
         await db.collection<Download>('downloads').updateOne(
           { _id: new ObjectId(downloadId) },
-          {
-            $set: {
-              redirectedUrl,
-              updatedAt: new Date(),
-            },
-          }
+          { $set: { redirectedUrl, updatedAt: new Date() } }
         )
       }
 
-      // Parse HTTP status (aria2 prints: status=498 etc)
+      // Parse HTTP status (status=498 etc)
       const statusMatch = output.match(/status=(\d{3})/)
       if (statusMatch) {
         lastHttpStatus = parseInt(statusMatch[1])
-        if ([498, 403, 401, 429].includes(lastHttpStatus)) {
+        if (shouldFallbackOnHttpStatus(lastHttpStatus)) {
           shouldFallbackCurl = true
         }
       }
 
-      // Parse torrent info
+      // Torrent metrics
       if (isTorrent) {
         const seedersMatch = output.match(/SEEDER:(\d+)/)
         const peersMatch = output.match(/PEER:(\d+)/)
@@ -252,7 +323,7 @@ async function processDownload(job: Job<DownloadJobData>) {
         if (uploadMatch) uploadSpeed = parseSizeToBytes(uploadMatch[1])
       }
 
-      // Parse progress
+      // parse progress
       const downloadMatch = output.match(/\((\d+)%\)/)
       const speedMatch = output.match(/DL:([0-9.]+[KMG]?i?B)/)
       const sizeMatch = output.match(/SIZE:([0-9.]+[KMG]?i?B)/)
@@ -270,16 +341,13 @@ async function processDownload(job: Job<DownloadJobData>) {
         downloadedBytes = Math.floor((percentage / 100) * totalBytes)
       }
 
-      if (speedMatch) {
-        speed = parseSizeToBytes(speedMatch[1])
-      }
+      if (speedMatch) speed = parseSizeToBytes(speedMatch[1])
 
       const now = Date.now()
 
-      // Redis progress (every 1 sec)
+      // redis progress
       if (now - lastRedisUpdate >= 1000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
-
         const progress: any = {
           downloadId,
           status: 'downloading',
@@ -305,10 +373,9 @@ async function processDownload(job: Job<DownloadJobData>) {
         lastRedisUpdate = now
       }
 
-      // Mongo progress (every 5 sec)
+      // mongo progress
       if (now - lastMongoUpdate >= 5000) {
         const eta = speed > 0 ? (totalBytes - downloadedBytes) / speed : 0
-
         const updateData: any = {
           totalBytes,
           downloadedBytes,
@@ -336,7 +403,7 @@ async function processDownload(job: Job<DownloadJobData>) {
       const statusMatch = s.match(/status=(\d{3})/)
       if (statusMatch) {
         lastHttpStatus = parseInt(statusMatch[1])
-        if ([498, 403, 401, 429].includes(lastHttpStatus)) {
+        if (shouldFallbackOnHttpStatus(lastHttpStatus)) {
           shouldFallbackCurl = true
         }
       }
@@ -346,37 +413,50 @@ async function processDownload(job: Job<DownloadJobData>) {
       aria2c.on('close', (code) => resolve(code || 0))
     })
 
-    // Fallback: protected links (498/403/401/429)
-    if (!isTorrent && (shouldFallbackCurl || lastHttpStatus === 498)) {
+    // fallback
+    if (!isTorrent && (shouldFallbackCurl || shouldFallbackOnHttpStatus(lastHttpStatus))) {
       console.log(
-        `aria2 failed with protected status=${lastHttpStatus}, falling back to curl...`
+        `aria2 failed/block status=${lastHttpStatus}, switching to curl smart download...`
       )
 
-      await runCurlDownload({
+      await runCurlSmartDownload({
         url: finalUrl,
         outputFile,
         downloadPath,
         headers,
+        maxRedirectSteps: 3,
       })
     } else if (exitCode !== 0) {
       throw new Error(`aria2c exited with code ${exitCode}`)
     }
 
-    // Find actual downloaded file
+    // locate the file
     const files = await fs.readdir(downloadPath)
 
     const downloadedFile =
-      files.find(
-        (f) =>
-          f !== '.aria2' &&
-          !f.endsWith('.aria2') &&
-          f !== path.basename(downloadPath)
-      ) || filename
+      files.find((f) => {
+        if (f === '.aria2') return false
+        if (f.endsWith('.aria2')) return false
+        if (f === path.basename(downloadPath)) return false
+        return true
+      }) || filename
 
     const finalOutputFile = path.join(downloadPath, downloadedFile)
 
+    // verify file exists
     const stats = await fs.stat(finalOutputFile)
     const finalSize = stats.size
+
+    // check it's not HTML trap
+    const head = await readFirstBytes(finalOutputFile, 4000)
+    if (head && looksLikeHtml(head)) {
+      const red = extractRedirectUrlFromHtml(head)
+      throw new Error(
+        `Downloaded content is HTML, not the actual file.${
+          red ? ` Detected redirect=${red}` : ''
+        }`
+      )
+    }
 
     const publicUrl = `${APP_URL}/d/${path.basename(
       path.dirname(downloadPath)
@@ -413,9 +493,6 @@ async function processDownload(job: Job<DownloadJobData>) {
   } catch (error: any) {
     console.error(`Download ${downloadId} failed:`, error)
 
-    const db = await getDb()
-    const redis = await getRedisClient()
-
     await db.collection<Download>('downloads').updateOne(
       { _id: new ObjectId(downloadId) },
       {
@@ -433,7 +510,6 @@ async function processDownload(job: Job<DownloadJobData>) {
   }
 }
 
-// Create worker
 const worker = new Worker<DownloadJobData>('downloads', processDownload, {
   connection,
   concurrency: 3,
@@ -453,7 +529,6 @@ worker.on('failed', (job, err) => {
 
 console.log('Download worker started')
 
-// Handle graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, closing worker...')
   await worker.close()
